@@ -112,7 +112,16 @@ function phoneNorm(p) { const d = String(p || '').replace(/\D/g, ''); if (d.leng
 // ------------------------------------------------------------ giriş
 async function boot() {
   const { data: { session } } = await sb.auth.getSession()
-  if (!session) return loginView()
+  if (!session) {
+    const h = new URLSearchParams(location.hash.slice(1))
+    if (h.get('error')) {   // E-posta bağlantısı kullanılmış ya da süresi dolmuş: sessizce giriş ekranına düşme, nedenini söyle
+      history.replaceState(null, '', location.pathname)
+      return loginView(/expired|invalid/i.test(h.get('error_description') || h.get('error_code') || '')
+        ? 'Bu e-posta bağlantısı daha önce kullanılmış ya da süresi dolmuş. Aşağıdan yeniden "Şifremi unuttum"a basın ve en son gelen e-postadaki bağlantıyı yalnız bir kez açın.'
+        : 'E-posta bağlantısı açılamadı: ' + (h.get('error_description') || h.get('error')))
+    }
+    return loginView()
+  }
   if (RECOVERY) return setPassword()
   S.me = session.user
   const st = await sb.from('rv_staff').select('role,display_name,active').eq('user_id', S.me.id).maybeSingle()
@@ -132,13 +141,18 @@ function loginView(msg) {
   $('app').innerHTML = `<div class="login"><div class="card">
    <h2 style="margin:0 0 4px">VITA Randevu</h2><p class="mute" style="margin-top:0">Personel girişi</p>
    <form id="lf"><label class="f">E-posta<input id="le" type="email" autocomplete="username" required></label><br>
-   <label class="f">Şifre<input id="lp" type="password" autocomplete="current-password" required></label><br>
+   <label class="f">Şifre<input id="lp" type="password" autocomplete="current-password" autocapitalize="off" spellcheck="false" required></label>
+   <div class="row mute" style="margin:6px 0 10px;justify-content:space-between"><label class="row"><input type="checkbox" id="lshow"> Şifreyi göster</label><span id="lcaps" class="tag w hidden">Caps Lock açık</span></div>
    <button class="btn p" style="width:100%">Giriş</button></form>
    <p><a href="#" id="lr" class="mute">Şifremi unuttum / ilk şifremi belirleyeceğim</a></p>
    <p id="lm" class="mute">${esc(msg || '')}</p></div></div>`
+  $('lshow').onchange = () => { $('lp').type = $('lshow').checked ? 'text' : 'password' }
+  const caps = e => { if (e.getModifierState) $('lcaps').classList.toggle('hidden', !e.getModifierState('CapsLock')) }
+  $('lp').addEventListener('keydown', caps); $('lp').addEventListener('keyup', caps)
   $('lf').onsubmit = async e => {
     e.preventDefault()
-    const { error } = await sb.auth.signInWithPassword({ email: $('le').value.trim(), password: $('lp').value })
+    $('le').value = $('le').value.trim().toLowerCase()
+    const { error } = await sb.auth.signInWithPassword({ email: $('le').value, password: $('lp').value })
     if (error) {     // Gerçek nedeni söyle: yanlış şifre / şifre hiç belirlenmemiş, onaysız e-posta, çok fazla deneme
       const m = String(error.message || '')
       $('lm').textContent = /invalid login credentials/i.test(m)

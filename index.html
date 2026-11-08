@@ -139,7 +139,15 @@ function loginView(msg) {
   $('lf').onsubmit = async e => {
     e.preventDefault()
     const { error } = await sb.auth.signInWithPassword({ email: $('le').value.trim(), password: $('lp').value })
-    if (error) { $('lm').textContent = 'Giriş başarısız: e-posta ya da şifre hatalı.'; return }
+    if (error) {     // Gerçek nedeni söyle: yanlış şifre / şifre hiç belirlenmemiş, onaysız e-posta, çok fazla deneme
+      const m = String(error.message || '')
+      $('lm').textContent = /invalid login credentials/i.test(m)
+        ? 'Giriş başarısız: e-posta ya da şifre hatalı. Şifreniz hiç belirlenmediyse yöneticiniz "Ayarlar → Personel hesapları" bölümünden belirleyebilir.'
+        : /email not confirmed/i.test(m) ? 'E-posta adresi henüz onaylanmamış. Yöneticiniz panelden şifrenizi belirleyince hesap onaylanır.'
+        : /rate limit|too many/i.test(m) ? 'Çok fazla deneme yapıldı. Birkaç dakika bekleyip tekrar deneyin.'
+        : 'Giriş yapılamadı: ' + m
+      return
+    }
     boot()
   }
   $('lr').onclick = async e => {
@@ -470,8 +478,33 @@ async function settingsView() {
    <div class="card"><h3 style="margin-top:0">Tatil günleri <button class="btn s p" onclick="holidayForm()">+ Tatil</button></h3>${hol.map(h => `<div class="part"><span class="n">${esc(dayLabel(h.day))} ${esc(h.note || '')}</span></div>`).join('') || '<p class="mute">Kayıtlı tatil yok.</p>'}</div>
    <div class="card"><h3 style="margin-top:0">Oda / cihazlar <button class="btn s p" onclick="resourceForm()">+ Oda/cihaz</button></h3><p class="mute">Bir tür tanımlanınca o hizmetlerde oda/cihaz çakışması denetlenir.</p><table class="list-click"><tr><th>Ad</th><th>Tür</th><th>Cihaz/yer</th></tr>${S.resources.map(r => `<tr onclick="resourceForm('${r.id}')"><td>${esc(r.name)}</td><td class="mute">${esc(r.kind)}</td><td>${r.units}</td></tr>`).join('')}</table></div>
    <div class="card"><h3 style="margin-top:0">Hizmetler</h3><table${adm ? ' class="list-click"' : ''}><tr><th>Hizmet</th><th>Süre</th><th>Geçiş</th><th>Kapasite</th><th>Oda türü</th><th></th></tr>${S.services.map(s => `<tr${adm ? ` onclick="serviceForm('${s.code}')"` : ''}><td>${esc(s.name)}</td><td>${s.duration_min} dk</td><td>${s.buffer_min} dk</td><td>${s.capacity}</td><td class="mute">${esc(s.resource_kind || '')}</td><td>${s.verified ? '<span class="tag g">teyitli</span>' : '<span class="tag w">teyit bekliyor</span>'}</td></tr>`).join('')}</table>${adm ? '' : '<p class="mute">Hizmet ayarlarını yönetici değiştirir.</p>'}</div>
-   ${adm ? '<div class="card"><h3 style="margin-top:0">Personel yetkileri</h3><div id="stf"></div></div>' : ''}`
-  if (adm) { const st = await q(sb.from('rv_staff').select('*').order('role')); $('stf').innerHTML = `<table>${st.map(x => `<tr><td>${esc(x.display_name)}</td><td>${x.role === 'admin' ? 'Yönetici' : x.role === 'ai' ? 'WhatsApp AI (yalnız müsaitlik)' : 'Personel'}</td><td>${x.active ? '<span class="tag g">aktif</span>' : '<span class="tag b">pasif</span>'}</td></tr>`).join('')}</table><p class="mute">Yeni personel: Supabase → Authentication → Invite ile davet edilir, sonra buraya eklenir.</p>` }
+   ${adm ? '<div class="card"><h3 style="margin-top:0">Personel hesapları</h3><div id="stf"></div></div>' : ''}`
+  if (adm) await staffAccounts()
+}
+async function staffAccounts() {
+  const st = await q(sb.rpc('rv_staff_accounts'))
+  $('stf').innerHTML = `<table><tr><th>Ad</th><th>E-posta</th><th>Yetki</th><th>Şifre</th><th>Son giriş</th><th></th></tr>${st.map(x => `<tr><td>${esc(x.display_name)}</td><td class="mute">${esc(x.email)}</td>
+    <td>${x.role === 'admin' ? 'Yönetici' : x.role === 'ai' ? 'WhatsApp AI (yalnız müsaitlik)' : 'Personel'} ${x.active ? '' : '<span class="tag b">pasif</span>'}</td>
+    <td>${x.has_password ? '<span class="tag g">belirlendi</span>' : '<span class="tag w">yok</span>'}</td><td class="mute">${x.last_sign_in_at ? new Date(x.last_sign_in_at).toLocaleString('tr-TR', { timeZone: TZ }) : '—'}</td>
+    <td>${x.role === 'staff' ? `<button class="btn s p" data-pw="${x.user_id}" data-n="${esc(x.display_name)}">Şifre belirle</button>` : ''}</td></tr>`).join('')}</table>
+    <p class="mute">Personelin şifresini buradan siz belirlersiniz; e-posta gerekmez. Şifreyi kişiye kendiniz iletin, kişi girdikten sonra üstteki "Şifre" düğmesiyle değiştirebilir.</p>`
+  $('stf').querySelectorAll('[data-pw]').forEach(b => b.onclick = () => staffPasswordDlg(b.dataset.pw, b.dataset.n))
+}
+function staffPasswordDlg(uid, name) {
+  dlg(`Şifre belirle: ${name}`, `<p class="mute">Yeni şifreyi iki kez yazın (en az 8 karakter, başında/sonunda boşluk olmasın). Kaydedilince bu kişi e-postası ve bu şifreyle hemen girebilir.</p>
+    <label class="f">Yeni şifre<input id="sp1" type="password" minlength="8" autocomplete="new-password"></label><br>
+    <label class="f">Yeni şifre (tekrar)<input id="sp2" type="password" minlength="8" autocomplete="new-password"></label>
+    <label class="row mute" style="margin-top:8px"><input type="checkbox" id="spg"> Şifreyi göster</label><p id="spm" class="mute"></p>`,
+    `<button class="btn p" id="spo">Şifreyi kaydet</button>`)
+  $('spg').onchange = () => { $('sp1').type = $('sp2').type = $('spg').checked ? 'text' : 'password' }
+  $('spo').onclick = async () => {
+    const a = $('sp1').value, b = $('sp2').value
+    if (a !== b) { $('spm').textContent = 'İki şifre aynı değil.'; return }
+    if (a.length < 8 || a !== a.trim()) { $('spm').textContent = 'En az 8 karakter olmalı, başında/sonunda boşluk olmamalı.'; return }
+    const { error } = await sb.rpc('rv_set_staff_password', { p_user: uid, p_password: a })
+    if (error) { $('spm').textContent = errText(error); return }
+    closeDlg(); toast(`${name} için şifre kaydedildi.`); staffAccounts()
+  }
 }
 function whText(w) { return Object.entries(w || {}).sort().map(([d, ws]) => `${DAYS[d - 1]} ${ws.map(x => x.join('–')).join(', ')}`).join(' · ') }
 function whParse(txt) {
@@ -544,7 +577,8 @@ function auditText(a) {
     if (o.starts_at !== n.starts_at) return `Saat değişti → ${new Date(n.starts_at).toLocaleString('tr-TR', { timeZone: TZ })}`
   }
   const nm = n.full_name || n.name || n.package_type || o.full_name || o.name || o.package_type || ''
-  return { INSERT: 'Eklendi', UPDATE: 'Güncellendi', DELETE: 'Silindi' }[a.action] + (nm ? `: ${nm}` : '')
+  if (a.action === 'PASSWORD') return `Şifre belirlendi: ${n.display_name || ''}`
+  return ({ INSERT: 'Eklendi', UPDATE: 'Güncellendi', DELETE: 'Silindi' }[a.action] || a.action) + (nm ? `: ${nm}` : '')
 }
 async function historyView() {
   const r = await q(sb.from('rv_audit').select('id,at,actor,tbl,row_id,action,old,new,undone_at').order('id', { ascending: false }).limit(150))

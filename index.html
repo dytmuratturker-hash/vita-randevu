@@ -56,6 +56,8 @@ dialog .ft{padding:12px 16px;border-top:1px solid var(--line);display:flex;gap:8
 .login .card{padding:22px}
 .days{display:flex;gap:6px;flex-wrap:wrap}.days label{display:flex;gap:3px;align-items:center;font-size:13px}
 .hidden{display:none!important}
+nav .cnt{display:inline-block;min-width:18px;margin-left:5px;padding:0 6px;border-radius:999px;background:var(--bad);color:#fff;font-size:11px;line-height:18px}
+.req{border-left:4px solid var(--warn)}.req.ok{border-left-color:var(--ok)}.req.no{border-left-color:var(--bad)}.req.done{border-left-color:var(--line);opacity:.85}
 .list-click tr{cursor:pointer}.list-click tr:hover td{background:#faf9f6}
 @media(max-width:640px){header{padding:9px 12px}nav{top:44px;padding:6px 12px}main{padding:12px}.occ{width:80px}}
 </style>
@@ -203,7 +205,7 @@ async function loadRef() {
 }
 
 function shell() {
-  const tabs = [['gun', 'Gün'], ['hafta', 'Hafta'], ['bos', 'Boş yerler'], ['danisan', 'Danışanlar'], ['ayar', 'Ayarlar'], ['gecmis', 'Geçmiş']]
+  const tabs = [['talep', 'Talepler<span id="tcount"></span>'], ['gun', 'Gün'], ['hafta', 'Hafta'], ['bos', 'Boş yerler'], ['danisan', 'Danışanlar'], ['ayar', 'Ayarlar'], ['gecmis', 'Geçmiş']]
   $('app').innerHTML = `<header><b>VITA Randevu</b><span class="who">${esc(S.name)} · ${S.role === 'admin' ? 'Yönetici' : 'Personel'}</span><button onclick="changePassword()">Şifre</button><button onclick="logout()">Çıkış</button></header>
   <nav>${tabs.map(([k, t]) => `<button data-v="${k}" onclick="go('${k}')">${t}</button>`).join('')}</nav><main id="m"></main>`
 }
@@ -211,7 +213,8 @@ function go(v, quiet) {
   S.view = v
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.v === v))
   if (!quiet) $('m').innerHTML = '<p class="mute">Yükleniyor…</p>'
-  return ({ gun: dayView, hafta: weekView, bos: freeView, danisan: clientsView, ayar: settingsView, gecmis: historyView }[v])().catch(e => { $('m').innerHTML = `<div class="card">${esc(errText(e))}</div>` })
+  talepCount()
+  return ({ talep: talepView, gun: dayView, hafta: weekView, bos: freeView, danisan: clientsView, ayar: settingsView, gecmis: historyView }[v])().catch(e => { $('m').innerHTML = `<div class="card">${esc(errText(e))}</div>` })
 }
 function filters() {
   return `<select onchange="S.svc=this.value;go(S.view)">${svcOpts(S.svc, 'Tüm hizmetler')}</select>
@@ -370,6 +373,59 @@ async function extendSeries() {
     for (const s of ser) { const r = await q(sb.rpc('rv_series_generate', { p_series: s.id, p_until: addDays(today(), 28) })).catch(e => [{ o_result: errText(e) }]); for (const x of r) x.o_result === 'eklendi' ? add++ : x.o_result !== 'zaten var' && errs.push(`${x.o_day || ''} ${errText(x.o_result)}`) }
     $('esr').innerHTML = `<p><b>${add}</b> ders eklendi.</p>${errs.length ? `<p class="mute">Eklenemeyenler:</p><ul>${errs.map(e => `<li>${esc(e)}</li>`).join('')}</ul>` : ''}`
     $('dlgF').innerHTML = ''
+  }
+}
+
+// ------------------------------------------------------------ talepler (WhatsApp AI ve personel)
+// AI talebi yalnız kaydeder; müşteriye kesin saat verilmez. Simay uygunluğu kontrol edip sonucu işaretler.
+const REQ_ST = { yeni: 'Yeni', onay_bekliyor: 'Onay bekliyor', onaylandi: 'Onaylandı', uygun_saat_yok: 'Uygun saat yok', tamamlandi: 'Tamamlandı', kapatildi: 'Kapatıldı' }
+const REQ_SVC = { pt: 'PT', reformer: 'Reformer', reformer3: 'Reformer 3 kişilik', reformer1: 'Bireysel Reformer', vita21: 'VITA 21' }
+const REQ_TABS = [['bekleyen', 'Yeni / onay bekleyen', ['yeni', 'onay_bekliyor']], ['onaylandi', 'Onaylanan', ['onaylandi']], ['uygun_saat_yok', 'Uygun saat bulunamayan', ['uygun_saat_yok']], ['kapali', 'Tamamlanan / kapatılan', ['tamamlandi', 'kapatildi']]]
+const FULLDAY = ['Pazartesi', 'Salı', 'Çarşamba', 'Perşembe', 'Cuma', 'Cumartesi', 'Pazar']
+S.reqTab = 'bekleyen'
+function reqDays(a) { return (a || []).map(d => FULLDAY[d] || '?').join(', ') || 'gün belirtilmedi' }
+function when(iso) { return new Intl.DateTimeFormat('tr-TR', { timeZone: TZ, day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(new Date(iso)) }
+async function talepCount() {
+  try {
+    const { count } = await sb.from('rv_request').select('id', { count: 'exact', head: true }).in('status', ['yeni', 'onay_bekliyor'])
+    const el = $('tcount'); if (el) el.innerHTML = count ? `<span class="cnt">${count}</span>` : ''
+  } catch (e) { /* sayaç gösterilemezse ekran yine açılır */ }
+}
+async function talepView() {
+  const tab = REQ_TABS.find(x => x[0] === S.reqTab) || REQ_TABS[0]
+  const list = await q(sb.from('rv_request').select('*').in('status', tab[2]).order('requested_at', { ascending: tab[0] === 'bekleyen' }).limit(200))
+  $('m').innerHTML = `<div class="bar">${REQ_TABS.map(([k, t]) => `<button class="btn s ${k === tab[0] ? 'p' : ''}" onclick="S.reqTab='${k}';go('talep')">${t}</button>`).join('')}
+     <span class="grow"></span><button class="btn s" onclick="newReq()">+ Talep ekle</button></div>
+   ${tab[0] === 'bekleyen' ? '<p class="mute">WhatsApp asistanı müşteriye saati kesinleştirmedi; "uygunluğu ekibimiz kontrol edip dönüş yapacak" dedi. Uygunluğu kontrol edin, müşteriye dönün ve sonucu işaretleyin.</p>' : ''}
+   ${list.length ? list.map(reqCard).join('') : '<div class="card mute">Bu bölümde talep yok.</div>'}`
+}
+function reqCard(r) {
+  const cls = { onaylandi: 'ok', uygun_saat_yok: 'no', tamamlandi: 'done', kapatildi: 'done' }[r.status] || ''
+  const tel = r.phone ? String(r.phone).replace(/[^\d+]/g, '') : ''
+  return `<div class="card req ${cls}"><div class="row"><b>${esc(REQ_SVC[r.service] || r.service)}</b><span>${esc(reqDays(r.weekdays))} · ${esc(r.pref_time || 'saat belirtilmedi')}</span>
+    <span class="tag ${r.status === 'onaylandi' ? 'g' : r.status === 'uygun_saat_yok' ? 'b' : r.status === 'onay_bekliyor' || r.status === 'yeni' ? 'w' : ''}">${REQ_ST[r.status]}</span>
+    <span class="grow" style="flex:1"></span><span class="mute">${r.source === 'whatsapp_ai' ? 'WhatsApp asistanı' : 'Personel'} · ${esc(when(r.requested_at))}</span></div>
+   <div class="row" style="margin-top:6px">${esc(r.full_name || '')} ${tel ? `<a href="tel:${esc(tel)}">${esc(r.phone)}</a> · <a href="https://wa.me/${esc(tel.replace('+', ''))}" target="_blank" rel="noopener">WhatsApp</a>` : '<span class="mute">telefon yok</span>'}
+     ${r.result_note ? `<span class="mute">Not: ${esc(r.result_note)}</span>` : ''}${r.handled_at ? `<span class="mute">· ${esc(when(r.handled_at))}</span>` : ''}</div>
+   <div class="row" style="margin-top:8px"><button class="btn s" onclick="S.svc='';S.view='bos';go('bos')">Boş yerlere bak</button>
+     ${['yeni', 'onay_bekliyor'].includes(r.status) ? `<button class="btn s p" onclick="setReq('${r.id}','onaylandi')">Onaylandı</button><button class="btn s d" onclick="setReq('${r.id}','uygun_saat_yok')">Uygun saat yok</button>` : ''}
+     ${r.status === 'onaylandi' || r.status === 'uygun_saat_yok' ? `<button class="btn s" onclick="setReq('${r.id}','tamamlandi')">Tamamlandı</button>` : ''}
+     ${r.status !== 'kapatildi' ? `<button class="btn s" onclick="setReq('${r.id}','kapatildi')">Kapat</button>` : `<button class="btn s" onclick="setReq('${r.id}','onay_bekliyor')">Yeniden aç</button>`}</div></div>`
+}
+function setReq(id, st) {
+  const hint = { onaylandi: 'ör. Pzt-Per-Cum 11:00, eğitmen', uygun_saat_yok: 'ör. 11:00 dolu, 17:00 önerildi', tamamlandi: 'ör. müşteriye bildirildi', kapatildi: 'ör. müşteri vazgeçti', onay_bekliyor: '' }[st]
+  dlg(`Talep: ${REQ_ST[st]}`, `<label class="f">Not (isteğe bağlı)<input id="rn" placeholder="${esc(hint)}"></label><p class="mute">Bu işaret müşteriye otomatik mesaj göndermez. Müşteriye dönüşü siz yaparsınız.</p>`,
+    `<button class="btn p" id="rok">Kaydet</button>`)
+  $('rok').onclick = async () => { await run(() => q(sb.rpc('rv_request_set', { p_id: id, p_status: st, p_note: $('rn').value || null })), 'Kaydedildi'); closeDlg(); go('talep', true) }
+}
+function newReq() {
+  dlg('Talep ekle', `<div class="grid2"><label class="f">Hizmet<select id="qs">${opts(Object.entries(REQ_SVC), 'pt')}</select></label><label class="f">Saat<input id="qt" type="time" value="11:00"></label>
+    <label class="f">Ad<input id="qn"></label><label class="f">Telefon<input id="qp" inputmode="tel"></label></div>
+    <div class="days" style="margin-top:8px">${FULLDAY.slice(0, 6).map((d, i) => `<label><input type="checkbox" value="${i}" class="qd"> ${d}</label>`).join('')}</div>`, `<button class="btn p" id="qok">Ekle</button>`)
+  $('qok').onclick = async () => {
+    const days = [...document.querySelectorAll('.qd:checked')].map(x => +x.value)
+    await run(() => q(sb.from('rv_request').insert({ source: 'personel', service: $('qs').value, pref_time: $('qt').value || null, full_name: $('qn').value || null, phone: phoneNorm($('qp').value), weekdays: days, status: 'onay_bekliyor' })), 'Talep eklendi')
+    closeDlg(); S.reqTab = 'bekleyen'; go('talep')
   }
 }
 

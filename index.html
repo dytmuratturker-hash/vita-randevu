@@ -144,8 +144,15 @@ function loginView(msg) {
   }
   $('lr').onclick = async e => {
     e.preventDefault(); const em = $('le').value.trim(); if (!em) { $('lm').textContent = 'Önce e-posta adresinizi yazın.'; return }
-    await sb.auth.resetPasswordForEmail(em, { redirectTo: location.origin + location.pathname })
-    $('lm').textContent = 'Şifre belirleme bağlantısı e-postanıza gönderildi (hesap varsa).'
+    const { error } = await sb.auth.resetPasswordForEmail(em, { redirectTo: location.origin + location.pathname })
+    if (error) {      // Gönderilemediyse "gönderildi" denmez; neden açıkça yazılır.
+      const m = String(error.message || '')
+      $('lm').textContent = /rate limit|too many|security purposes/i.test(m)
+        ? 'E-posta şu an gönderilemedi: kısa sürede çok fazla istek yapıldı. Lütfen 1 saat sonra tekrar deneyin ya da yöneticinizden şifrenizi belirlemesini isteyin.'
+        : 'E-posta gönderilemedi (' + m + '). Yöneticinizden şifrenizi belirlemesini isteyin.'
+      return
+    }
+    $('lm').textContent = 'Şifre belirleme bağlantısı e-postanıza gönderildi (hesap varsa). Birkaç dakika içinde gelmezse spam klasörüne bakın; yine yoksa yöneticinize haber verin.'
   }
 }
 sb.auth.onAuthStateChange((ev) => { if (ev === 'PASSWORD_RECOVERY') { RECOVERY = true; setPassword() } })

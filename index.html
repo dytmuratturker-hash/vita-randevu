@@ -70,6 +70,8 @@ dialog .ft{padding:12px 16px;border-top:1px solid var(--line);display:flex;gap:8
 <script>
 'use strict'
 // VITA Randevu paneli. Yetki veritabanında (RLS); bu sayfa yalnız arayüzdür. Gizli anahtar içermez (anon anahtar herkese açık tasarlanmıştır).
+// Şifre e-postasındaki bağlantıyla gelindiyse (URL'de type=recovery), oturum açılsa bile önce yeni şifre ekranı gösterilir.
+let RECOVERY = /type=recovery/.test(location.hash + location.search)
 const sb = supabase.createClient(window.VITA_CFG.url, window.VITA_CFG.anonKey, { auth: { persistSession: true, autoRefreshToken: true } })
 const TZ = 'Europe/Istanbul'
 const DAYS = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Paz']
@@ -111,6 +113,7 @@ function phoneNorm(p) { const d = String(p || '').replace(/\D/g, ''); if (d.leng
 async function boot() {
   const { data: { session } } = await sb.auth.getSession()
   if (!session) return loginView()
+  if (RECOVERY) return setPassword()
   S.me = session.user
   const st = await sb.from('rv_staff').select('role,display_name,active').eq('user_id', S.me.id).maybeSingle()
   if (!st.data || !st.data.active || !['staff', 'admin'].includes(st.data.role)) {
@@ -120,8 +123,10 @@ async function boot() {
   S.role = st.data.role; S.name = st.data.display_name
   await loadRef()
   shell(); go(S.view)
-  setInterval(() => { if (!document.hidden && !$('dlg').open) go(S.view, true) }, 60000)
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && !$('dlg').open) go(S.view, true) })
+  if (!S.timer) {     // boot birden çok kez çağrılsa da yenileme tek kez kurulur
+    S.timer = setInterval(() => { if (S.role && !document.hidden && !$('dlg').open) go(S.view, true) }, 60000)
+    document.addEventListener('visibilitychange', () => { if (S.role && !document.hidden && !$('dlg').open) go(S.view, true) })
+  }
 }
 function loginView(msg) {
   $('app').innerHTML = `<div class="login"><div class="card">
@@ -143,10 +148,22 @@ function loginView(msg) {
     $('lm').textContent = 'Şifre belirleme bağlantısı e-postanıza gönderildi (hesap varsa).'
   }
 }
-sb.auth.onAuthStateChange((ev) => { if (ev === 'PASSWORD_RECOVERY') setPassword() })
+sb.auth.onAuthStateChange((ev) => { if (ev === 'PASSWORD_RECOVERY') { RECOVERY = true; setPassword() } })
+const PW_FORM = `<form id="pf"><label class="f">Yeni şifre (en az 8 karakter)<input id="pp" type="password" minlength="8" autocomplete="new-password" required></label><br>
+  <label class="f">Yeni şifre (tekrar)<input id="pp2" type="password" minlength="8" autocomplete="new-password" required></label><br><button class="btn p">Şifreyi kaydet</button></form><p id="pm" class="mute"></p>`
+async function savePassword(after) {
+  if ($('pp').value !== $('pp2').value) { $('pm').textContent = 'İki şifre aynı değil.'; return }
+  const { error } = await sb.auth.updateUser({ password: $('pp').value })
+  if (error) { $('pm').textContent = errText(error); return }
+  RECOVERY = false; history.replaceState(null, '', location.pathname); toast('Şifre kaydedildi. Bundan sonra e-posta ve bu şifreyle girebilirsiniz.'); after()
+}
 function setPassword() {
-  $('app').innerHTML = `<div class="login"><div class="card"><h3>Yeni şifre</h3><form id="pf"><label class="f">Yeni şifre (en az 10 karakter)<input id="pp" type="password" minlength="10" autocomplete="new-password" required></label><br><button class="btn p">Kaydet</button></form><p id="pm" class="mute"></p></div></div>`
-  $('pf').onsubmit = async e => { e.preventDefault(); const { error } = await sb.auth.updateUser({ password: $('pp').value }); if (error) { $('pm').textContent = errText(error); return } history.replaceState(null, '', location.pathname); boot() }
+  $('app').innerHTML = `<div class="login"><div class="card"><h3>Yeni şifre belirleyin</h3><p class="mute">Bu ekrandan çıkmadan şifrenizi kaydedin; sonraki girişlerde e-posta ve bu şifre kullanılır.</p>${PW_FORM}</div></div>`
+  $('pf').onsubmit = e => { e.preventDefault(); savePassword(boot) }
+}
+function changePassword() {
+  dlg('Şifre değiştir', PW_FORM, '')
+  $('pf').onsubmit = e => { e.preventDefault(); savePassword(closeDlg) }
 }
 async function logout() { await sb.auth.signOut(); location.reload() }
 
@@ -158,7 +175,7 @@ async function loadRef() {
 
 function shell() {
   const tabs = [['gun', 'Gün'], ['hafta', 'Hafta'], ['bos', 'Boş yerler'], ['danisan', 'Danışanlar'], ['ayar', 'Ayarlar'], ['gecmis', 'Geçmiş']]
-  $('app').innerHTML = `<header><b>VITA Randevu</b><span class="who">${esc(S.name)} · ${S.role === 'admin' ? 'Yönetici' : 'Personel'}</span><button onclick="logout()">Çıkış</button></header>
+  $('app').innerHTML = `<header><b>VITA Randevu</b><span class="who">${esc(S.name)} · ${S.role === 'admin' ? 'Yönetici' : 'Personel'}</span><button onclick="changePassword()">Şifre</button><button onclick="logout()">Çıkış</button></header>
   <nav>${tabs.map(([k, t]) => `<button data-v="${k}" onclick="go('${k}')">${t}</button>`).join('')}</nav><main id="m"></main>`
 }
 function go(v, quiet) {

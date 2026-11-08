@@ -1,0 +1,2 @@
+// Herkese açık bağlantı bilgisi (anon anahtar tarayıcı için tasarlanmıştır; yetki veritabanında RLS ile korunur).
+window.VITA_CFG = { url: 'https://nvmpkwdbaldfqopkxgyy.supabase.co', anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im52bXBrd2RiYWxkZnFvcGt4Z3l5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI0MDU2NjEsImV4cCI6MjEwNzk4MTY2MX0.D4RG10od2alRdnkHRNIVqq7DuxbdmNQjg42jLVsr0w8' }

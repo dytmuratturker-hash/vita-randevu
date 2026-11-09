@@ -31,7 +31,7 @@ input,select,textarea{border:1px solid var(--line);border-radius:9px;padding:7px
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:10px}
 .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .mute{color:var(--mute);font-size:13px}.tag{display:inline-block;background:var(--chip);border-radius:999px;padding:1px 9px;font-size:12px;color:var(--acc)}
-.tag.w{background:#fbefd9;color:var(--warn)}.tag.b{background:var(--full);color:var(--bad)}.tag.g{background:var(--free);color:var(--ok)}
+.tag.w{background:#fbefd9;color:var(--warn)}.warn{color:var(--warn);background:#fbefd9;padding:6px 8px;border-radius:6px}.tag.b{background:var(--full);color:var(--bad)}.tag.g{background:var(--free);color:var(--ok)}
 .occ{height:6px;background:#eee;border-radius:9px;overflow:hidden;width:120px}.occ i{display:block;height:100%;background:var(--acc2)}
 .occ.full i{background:var(--bad)}
 .part{display:flex;align-items:center;gap:8px;padding:6px 0;border-top:1px dashed var(--line);flex-wrap:wrap}
@@ -205,7 +205,7 @@ async function loadRef() {
 }
 
 function shell() {
-  const tabs = [['talep', 'Talepler<span id="tcount"></span>'], ['gun', 'Gün'], ['hafta', 'Hafta'], ['bos', 'Boş yerler'], ['danisan', 'Danışanlar'], ['ayar', 'Ayarlar'], ['gecmis', 'Geçmiş']]
+  const tabs = [['talep', 'Talepler<span id="tcount"></span>'], ['gun', 'Gün'], ['hafta', 'Hafta'], ['bos', 'Boş yerler'], ['danisan', 'Danışanlar'], ['paket', 'Paketler<span id="pcount"></span>'], ['ayar', 'Ayarlar'], ['gecmis', 'Geçmiş']]
   $('app').innerHTML = `<header><b>VITA Randevu</b><span class="who">${esc(S.name)} · ${S.role === 'admin' ? 'Yönetici' : 'Personel'}</span><button onclick="changePassword()">Şifre</button><button onclick="logout()">Çıkış</button></header>
   <nav>${tabs.map(([k, t]) => `<button data-v="${k}" onclick="go('${k}')">${t}</button>`).join('')}</nav><main id="m"></main>`
 }
@@ -213,8 +213,8 @@ function go(v, quiet) {
   S.view = v
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.v === v))
   if (!quiet) $('m').innerHTML = '<p class="mute">Yükleniyor…</p>'
-  talepCount()
-  return ({ talep: talepView, gun: dayView, hafta: weekView, bos: freeView, danisan: clientsView, ayar: settingsView, gecmis: historyView }[v])().catch(e => { $('m').innerHTML = `<div class="card">${esc(errText(e))}</div>` })
+  talepCount(); pkgCount()
+  return ({ talep: talepView, gun: dayView, hafta: weekView, bos: freeView, danisan: clientsView, paket: packageAlertsView, ayar: settingsView, gecmis: historyView }[v])().catch(e => { $('m').innerHTML = `<div class="card">${esc(errText(e))}</div>` })
 }
 function filters() {
   return `<select onchange="S.svc=this.value;go(S.view)">${svcOpts(S.svc, 'Tüm hizmetler')}</select>
@@ -258,7 +258,10 @@ function sessCard(s) {
 }
 async function mark(id, st) { await run(() => q(sb.from('rv_booking').update({ status: st }).eq('id', id)), st === 'attended' ? 'Geldi işaretlendi' : 'Gelmedi işaretlendi'); go(S.view, true) }
 async function cancelB(id) {
-  dlg('Randevuyu iptal et', `<p>Yalnız bu ders iptal edilir; seri (haftalık tekrar) devam eder. Paket hakkı geri döner.</p><label class="f">Neden (isteğe bağlı)<input id="cr" placeholder="ör. danışan gelemiyor"></label>`,
+  const bk = await q(sb.from('rv_booking').select('package_id,rv_session(starts_at)').eq('id', id).single())
+  const late = bk.package_id && ymd(new Date(bk.rv_session.starts_at)) <= today()
+  dlg('Randevuyu iptal et', `<p>Yalnız bu ders iptal edilir; seri (haftalık tekrar) devam eder, kontenjan boşalır.</p>
+    <p class="${late ? 'warn' : 'mute'}">${late ? '<b>Aynı gün iptal:</b> kurala göre paket hakkı DÜŞER.' : bk.package_id ? 'Önceden bildirilen iptal: paket hakkı geri döner. Telafi ayda 1 kez yazılabilir.' : 'Bu randevu pakete bağlı değil (hak düşmez).'}</p><label class="f">Neden (isteğe bağlı)<input id="cr" placeholder="ör. danışan gelemiyor"></label>`,
     `<button class="btn d" id="cok">İptal et</button>`)
   $('cok').onclick = async () => { await run(() => q(sb.rpc('rv_cancel_booking', { p_booking: id, p_reason: $('cr').value || null })), 'İptal edildi'); closeDlg(); go(S.view, true) }
 }
@@ -496,7 +499,7 @@ async function packageForm(c, p) {
     <label class="f">Paket türü<input id="pkt" value="${esc(p?.package_type || '')}" placeholder="ör. Reformer 3 kişilik 8 ders"></label>
     <label class="f">Eğitmen<select id="pktr">${trnOpts(p?.trainer_id, 'Belirtilmedi')}</select></label>
     <label class="f">Başlangıç<input id="pks" type="date" value="${p?.starts_on || today()}"></label>
-    <label class="f">Bitiş<input id="pke" type="date" value="${p?.ends_on || ''}"></label>
+    <label class="f">Bitiş (boşsa başlangıçtan 30 gün)<input id="pke" type="date" value="${p?.ends_on || ''}"></label>
     <label class="f">Toplam seans<input id="pkn" type="number" min="1" value="${p?.total_sessions || 8}"></label>
     <label class="f">Sistem öncesi kullanılan seans<input id="pku" type="number" min="0" value="${p?.used_manual || 0}"></label>
     <label class="f">Durum<select id="pka">${opts([['true', 'Aktif'], ['false', 'Pasif']], String(p ? p.active : true))}</select></label></div>
@@ -550,6 +553,40 @@ async function settingsView() {
    <div class="card"><h3 style="margin-top:0">Hizmetler</h3><table${adm ? ' class="list-click"' : ''}><tr><th>Hizmet</th><th>Süre</th><th>Geçiş</th><th>Kapasite</th><th>Oda türü</th><th></th></tr>${S.services.map(s => `<tr${adm ? ` onclick="serviceForm('${s.code}')"` : ''}><td>${esc(s.name)}</td><td>${s.duration_min} dk</td><td>${s.buffer_min} dk</td><td>${s.capacity}</td><td class="mute">${esc(s.resource_kind || '')}</td><td>${s.verified ? '<span class="tag g">teyitli</span>' : '<span class="tag w">teyit bekliyor</span>'}</td></tr>`).join('')}</table>${adm ? '' : '<p class="mute">Hizmet ayarlarını yönetici değiştirir.</p>'}</div>
    ${adm ? '<div class="card"><h3 style="margin-top:0">Personel hesapları</h3><div id="stf"></div></div>' : ''}`
   if (adm) await staffAccounts()
+  if (adm) await pkgRuleCard()
+}
+async function pkgRuleCard() {
+  const r = (await q(sb.from('rv_setting').select('value').eq('key', 'package_required_from')))[0]
+  const div = document.createElement('div'); div.className = 'card'
+  div.innerHTML = `<h3 style="margin-top:0">Paket zorunluluğu (yönetici)</h3>
+    <p class="mute">Açıkken bu tarihten sonraki YENİ Reformer/PT randevuları paket ister. Aktarılmış eski seriler etkilenmez. Paketler girilmeden açmayın.</p>
+    <div class="row"><input id="prf" type="date" value="${esc(r?.value || '')}"><button class="btn p" id="prs">Kaydet</button><button class="btn" id="prk">Kapat</button>
+    <span class="mute">${r?.value ? 'AÇIK: ' + esc(r.value) + ' itibarıyla' : 'KAPALI'}</span></div>`
+  $('m').appendChild(div)
+  const save = async (v) => { await run(() => q(sb.from('rv_setting').update({ value: v }).eq('key', 'package_required_from')), v ? 'Paket zorunluluğu açıldı' : 'Paket zorunluluğu kapatıldı'); go('ayar', true) }
+  $('prs').onclick = () => $('prf').value ? save($('prf').value) : toast('Tarih seçin.', true)
+  $('prk').onclick = () => save(null)
+}
+async function pkgAlerts() {
+  const pk = await q(sb.from('rv_package_status').select('*').eq('active', true))
+  return pk.map(p => ({ ...p, left: p.total_sessions - p.used - p.reserved }))
+           .filter(p => p.expired || (p.days_left !== null && p.days_left <= 3) || p.left <= 1)
+}
+async function pkgCount() {
+  try { const n = (await pkgAlerts()).length; const el = $('pcount'); if (el) el.innerHTML = n ? ` <span class="tag b">${n}</span>` : '' } catch (e) { }
+}
+async function packageAlertsView() {
+  await loadRef()
+  const al = await pkgAlerts()
+  const ids = [...new Set(al.map(p => p.client_id))]
+  const cs = ids.length ? await q(sb.from('rv_client').select('id,full_name').in('id', ids)) : []
+  const nm = Object.fromEntries(cs.map(c => [c.id, c.full_name]))
+  const row = (p, why) => `<tr onclick="clientDetail('${p.client_id}')"><td>${esc(nm[p.client_id] || '?')}</td><td>${esc(p.package_type)}</td><td>${p.starts_on} → ${p.ends_on || '—'}</td><td>${p.used}/${p.total_sessions} (planlı ${p.reserved})</td><td>${why}</td></tr>`
+  const g = [['Süresi dolan (yeni randevu kapalı, uzatma yönetici)', al.filter(p => p.expired), p => `<span class="tag b">${-p.days_left} gün geçti</span>`],
+             ['3 gün içinde bitecek', al.filter(p => !p.expired && p.days_left !== null && p.days_left <= 3), p => `${p.days_left} gün kaldı`],
+             ['Hakkı bitti ya da 1 kaldı (yeni paket gerekir)', al.filter(p => !p.expired && !(p.days_left !== null && p.days_left <= 3) && p.left <= 1), p => `kalan ${p.left}`]]
+  $('m').innerHTML = `<div class="card"><h3 style="margin-top:0">Paket uyarıları</h3><p class="mute">Kalan haklar silinmez. Süre uzatma ve hak ekleme yalnız yöneticide. Telafi ayda 1. Aynı gün iptalde hak düşer.</p>
+    ${g.map(([h, list, why]) => `<h4>${h} (${list.length})</h4>${list.length ? `<table class="list-click"><tr><th>Danışan</th><th>Paket</th><th>Tarih</th><th>Kullanım</th><th></th></tr>${list.map(p => row(p, why(p))).join('')}</table>` : '<p class="mute">Yok.</p>'}`).join('')}</div>`
 }
 async function staffAccounts() {
   const st = await q(sb.rpc('rv_staff_accounts'))

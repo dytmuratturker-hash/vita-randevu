@@ -447,14 +447,23 @@ async function freeView() {
 
 // ------------------------------------------------------------ danışanlar
 async function clientsView() {
-  $('m').innerHTML = `<div class="bar"><input id="cs" placeholder="Ad ya da telefon ara" class="grow" style="flex:1;min-width:200px"><label class="row mute"><input type="checkbox" id="cp"> Pasifler</label><button class="btn p" onclick="clientForm()">+ Yeni danışan</button></div><div id="cl"></div>`
+  $('m').innerHTML = `<div class="bar"><input id="cs" placeholder="Ad ya da telefon ara" class="grow" style="flex:1;min-width:200px"><label class="row mute"><input type="checkbox" id="cp"> Pasifler</label><button class="btn p" onclick="clientForm()">+ Yeni danışan</button></div><div id="ccount" class="card row" style="gap:14px"><span class="mute">Danışan sayısı yükleniyor…</span></div><div id="cl"></div>`
+  const totals = async () => {
+    // Sayılar veritabanından (sayfa sınırından bağımsız). Personel dışı kullanıcı RLS nedeniyle 0 görür.
+    const n = async (f) => { let p = sb.from('rv_client').select('id', { count: 'exact', head: true }); if (f) p = f(p); const { count, error } = await p; if (error) throw error; return count ?? 0 }
+    const [all, act] = await Promise.all([n(), n(p => p.eq('active', true))])
+    return { all, act, pas: all - act }
+  }
   const load = async () => {
     const v = $('cs').value.trim(), digits = v.replace(/\D/g, '')
-    let p = sb.from('rv_client').select('id,full_name,phone,active,source,rv_package(id,kind,package_type,active,ends_on)').order('full_name').limit(200)
+    let p = sb.from('rv_client').select('id,full_name,phone,active,source,rv_package(id,kind,package_type,active,ends_on)', { count: 'exact' }).order('full_name').limit(200)
     if (!$('cp').checked) p = p.eq('active', true)
     if (v) p = digits.length >= 4 ? p.ilike('phone', `%${digits.slice(-9)}%`) : p.ilike('full_name', `%${v}%`)
-    const r = await q(p)
-    $('cl').innerHTML = `<div class="card"><table class="list-click"><tr><th>Ad soyad</th><th>Telefon</th><th>Aktif paket</th><th></th></tr>${r.map(c => { const ap = (c.rv_package || []).filter(x => x.active); return `<tr onclick="clientDetail('${c.id}')"><td>${esc(c.full_name)} ${c.active ? '' : '<span class="tag b">pasif</span>'}</td><td class="mute">${esc(c.phone || '')}</td><td>${ap.map(x => `<span class="tag">${esc(KIND[x.kind])}</span>`).join(' ') || '<span class="tag w">paket yok</span>'}</td><td class="mute">${c.source === 'clinyo' ? 'Clinyo' : ''}</td></tr>` }).join('')}</table>${r.length === 200 ? '<p class="mute">İlk 200 kayıt; aramayı daraltın.</p>' : ''}${!r.length ? '<p class="mute">Kayıt yok.</p>' : ''}</div>`
+    const [{ data: r, count: match, error }, tt] = await Promise.all([p, totals().catch(() => null)])
+    if (error) return toast(errText(error), true)
+    $('ccount').innerHTML = tt ? `<b style="font-size:1.1em">Toplam danışan: ${tt.all}</b><span class="tag g">Aktif ${tt.act}</span><span class="tag">Pasif ${tt.pas}</span>
+      <span class="grow" style="flex:1"></span><span class="mute">${v ? `Arama sonucu: <b>${match}</b>` : `Listede: <b>${match}</b> ${$('cp').checked ? '(aktif + pasif)' : '(aktif)'}`}${match > r.length ? ` · ilk ${r.length} gösteriliyor` : ''}</span>` : '<span class="mute">Danışan sayısı alınamadı.</span>'
+    $('cl').innerHTML = `<div class="card"><table class="list-click"><tr><th>Ad soyad</th><th>Telefon</th><th>Aktif paket</th><th></th></tr>${r.map(c => { const ap = (c.rv_package || []).filter(x => x.active); return `<tr onclick="clientDetail('${c.id}')"><td>${esc(c.full_name)} ${c.active ? '' : '<span class="tag b">pasif</span>'}</td><td class="mute">${esc(c.phone || '')}</td><td>${ap.map(x => `<span class="tag">${esc(KIND[x.kind])}</span>`).join(' ') || '<span class="tag w">paket yok</span>'}</td><td class="mute">${c.source === 'clinyo' ? 'Clinyo' : ''}</td></tr>` }).join('')}</table>${match > r.length ? `<p class="mute">${match} kayıttan ilk ${r.length} gösteriliyor; aramayı daraltın.</p>` : ''}${!r.length ? '<p class="mute">Kayıt yok.</p>' : ''}</div>`
   }
   let h; $('cs').oninput = () => { clearTimeout(h); h = setTimeout(load, 250) }; $('cp').onchange = load; load()
 }
@@ -473,24 +482,63 @@ async function clientDetail(id) {
   const c = await q(sb.from('rv_client').select('*').eq('id', id).single())
   const pk = await q(sb.from('rv_package_status').select('*').eq('client_id', id).order('starts_on', { ascending: false }))
   const ser = await q(sb.from('rv_series').select('*').eq('client_id', id).eq('active', true))
-  const up = await q(sb.from('rv_booking').select('id,status,kind,rv_session!inner(starts_at,service_code,trainer_id)').eq('client_id', id).neq('status', 'cancelled').gte('rv_session.starts_at', new Date().toISOString()).order('created_at').limit(30))
+  // 10.11: Eskiden oluşturulma sırasına göre ilk 30 kayıt alınıyordu; haftada 3 gün gelen danışanda bazı günler listeden düşebiliyordu.
+  const up = await q(sb.from('rv_booking').select('id,status,kind,rv_session!inner(starts_at,service_code,trainer_id)').eq('client_id', id).neq('status', 'cancelled').gte('rv_session.starts_at', new Date().toISOString()).limit(500))
   up.sort((a, b) => a.rv_session.starts_at.localeCompare(b.rv_session.starts_at))
+  const notes = await sb.from('rv_client_note').select('*').eq('client_id', id).order('created_at', { ascending: false })
+  // Paket programı ile takvim karşılaştırması: hangi günlerde serisi/randevusu var, hangi günler eksik (yalnız uyarı; otomatik randevu açılmaz)
+  const upDays = new Set(up.map(b => (new Date(b.rv_session.starts_at).getUTCDay() + 6) % 7 + 1 + ':' + b.rv_session.service_code))
+  const progCheck = p => {
+    if (!p.active || !(p.weekly_days || []).length) return ''
+    const miss = p.weekly_days.filter(d => !ser.some(s => s.weekday === d && p.services.includes(s.service_code)) && !p.services.some(c => upDays.has(d + ':' + c)))
+    return miss.length ? `<div class="tag w" style="display:block;margin:6px 0">Programda ${esc(p.weekly_days.map(d => DAYS[d - 1]).join(', '))} var; takvimde ${esc(miss.map(d => DAYS[d - 1]).join(', '))} randevusu yok. Doğruysa "Haftalık seri oluştur" ile ekleyin.</div>` : ''
+  }
   dlg(c.full_name, `<p class="mute">${esc(c.phone || 'telefon yok')} ${c.source === 'clinyo' ? '· Clinyo' : ''} ${c.active ? '' : '· <span class="tag b">pasif</span>'} <button class="btn s" id="ced">Düzenle</button></p>
     <h4>Paketler <button class="btn s p" id="cpk">+ Paket / hizmet</button></h4>
     ${pk.map(p => { const rem = p.total_sessions - p.used - p.reserved; return `<div class="card"><div class="row"><b>${esc(p.package_type)}</b><span class="tag">${esc(KIND[p.kind])}</span>${p.active ? '' : '<span class="tag b">pasif</span>'}<span class="grow" style="flex:1"></span><button class="btn s" data-pk="${p.id}">Düzenle</button></div>
       <div class="mute">${esc(p.services.map(x => svc(x).name).join(', '))} · ${esc(trn(p.trainer_id))} · ${p.starts_on} → ${p.ends_on || 'süresiz'}</div>
       <div class="mute">Gün/saat: ${esc((p.weekly_days || []).map(d => DAYS[d - 1]).join(', ') || '—')} ${esc((p.weekly_times || []).map(t => t.slice(0, 5)).join(', '))}</div>
       <div>Toplam <b>${p.total_sessions}</b> · Kullanılan <b>${p.used}</b> · Planlı <b>${p.reserved}</b> · Kalan <b class="${rem <= 1 ? '' : ''}">${rem}</b> ${rem <= 1 && p.active ? '<span class="tag w">bitiyor</span>' : ''}</div>
-      ${p.active && p.weekly_days?.length && p.weekly_times?.length ? `<button class="btn s" data-ser="${p.id}">Haftalık seri oluştur</button>` : ''}</div>` }).join('') || '<p class="mute">Paket yok.</p>'}
+      ${progCheck(p)}${p.active ? `<button class="btn s" data-ser="${p.id}">Haftalık seri oluştur</button>` : ''}</div>` }).join('') || '<p class="mute">Paket yok.</p>'}
     <h4>Haftalık seriler</h4>${ser.map(s => `<div class="part"><span class="n">${DAYS[s.weekday - 1]} ${s.start_time.slice(0, 5)} · ${esc(svc(s.service_code).name)} · ${esc(trn(s.trainer_id))}</span><button class="btn s d" data-end="${s.id}">Seriyi bitir</button></div>`).join('') || '<p class="mute">Seri yok.</p>'}
-    <h4>Yaklaşan randevular</h4>${up.map(b => `<div class="part"><span class="n">${esc(dayLabel(ymd(new Date(b.rv_session.starts_at))))} ${hm(b.rv_session.starts_at)} · ${esc(svc(b.rv_session.service_code).name)} ${b.kind === 'makeup' ? '<span class="tag">telafi</span>' : ''}</span><button class="btn s" data-mv="${b.id}" data-c="${b.rv_session.service_code}">Taşı</button><button class="btn s d" data-cx="${b.id}">İptal</button></div>`).join('') || '<p class="mute">Yaklaşan randevu yok.</p>'}`, '')
+    <h4>Yaklaşan randevular</h4>${up.map(b => `<div class="part"><span class="n">${esc(dayLabel(ymd(new Date(b.rv_session.starts_at))))} ${hm(b.rv_session.starts_at)} · ${esc(svc(b.rv_session.service_code).name)} ${b.kind === 'makeup' ? '<span class="tag">telafi</span>' : ''}</span><button class="btn s" data-mv="${b.id}" data-c="${b.rv_session.service_code}">Taşı</button><button class="btn s d" data-cx="${b.id}">İptal</button></div>`).join('') || '<p class="mute">Yaklaşan randevu yok.</p>'}
+    <h4>Sekreter notları</h4>${noteBlock(notes)}`, '')
+  bindNotes(id, notes)
   $('ced').onclick = () => clientForm(c)
   $('cpk').onclick = () => packageForm(c)
   $('dlgB').querySelectorAll('[data-pk]').forEach(b => b.onclick = () => packageForm(c, pk.find(p => p.id === b.dataset.pk)))
-  $('dlgB').querySelectorAll('[data-ser]').forEach(b => b.onclick = () => makeSeries(c, pk.find(p => p.id === b.dataset.ser)))
+  $('dlgB').querySelectorAll('[data-ser]').forEach(b => b.onclick = () => makeSeries(c, pk.find(p => p.id === b.dataset.ser), ser))
   $('dlgB').querySelectorAll('[data-end]').forEach(b => b.onclick = async () => { const n = await run(() => q(sb.rpc('rv_end_series', { p_series: b.dataset.end, p_from: today() })), 'Seri bitirildi'); clientDetail(id) })
   $('dlgB').querySelectorAll('[data-cx]').forEach(b => b.onclick = async () => { await run(() => q(sb.rpc('rv_cancel_booking', { p_booking: b.dataset.cx, p_reason: 'iptal' })), 'İptal edildi'); clientDetail(id) })
   $('dlgB').querySelectorAll('[data-mv]').forEach(b => b.onclick = () => moveDlg(b.dataset.mv, b.dataset.c, false))
+}
+// ------------------------------------------------------------ sekreter notu (010)
+// Yalnız panel personeli görür (RLS). Danışan uygulamasına açılmaz. Sağlık bilgisi yazılmaz: anahtar kelimede uyarı verilir.
+const HEALTH_WORDS = /(ameliyat|fıtık|fitik|hamile|gebe|ilaç|ilac|hastalı|hastali|tansiyon|diyabet|şeker hast|seker hast|kanser|kalp|astım|astim|tiroid|depresyon|psikiyatr|rapor|teşhis|teshis|tedavi|epilepsi|migren)/i
+function noteWhen(n) { return when(n.created_at) + (n.editor_name ? ` · düzenledi: ${n.editor_name}, ${when(n.updated_at)}` : '') }
+function noteBlock(res) {
+  if (res.error) return `<p class="mute">Not alanı henüz etkin değil.</p>`
+  const list = res.data || []
+  return `<div id="notes">${list.map(n => `<div class="card" style="padding:8px 10px;margin:6px 0" data-note="${n.id}"><div class="nb" style="white-space:pre-wrap">${esc(n.body)}</div>
+      <div class="row mute" style="font-size:.85em;margin-top:4px"><span>${esc(n.author_name || 'personel')} · ${esc(noteWhen(n))}</span><span class="grow" style="flex:1"></span><button class="btn s" data-ne="${n.id}">Düzenle</button></div></div>`).join('') || '<p class="mute">Not yok.</p>'}
+    <textarea id="nn" rows="2" maxlength="1000" style="width:100%;margin-top:6px" placeholder="Operasyonel not (ör. saat tercihi, ödeme hatırlatması). Sağlık bilgisi yazmayın."></textarea>
+    <div class="row"><span class="mute" id="nc">0/1000</span><span class="grow" style="flex:1"></span><button class="btn s p" id="nadd">Not ekle</button></div></div>`
+}
+function healthOk(t) { return !HEALTH_WORDS.test(t) || confirm('Notta sağlıkla ilgili bir ifade var. Sağlık bilgisi bu panele yazılmamalı. Yine de kaydedilsin mi?') }
+function bindNotes(cid, res) {
+  if (res.error || !$('nadd')) return
+  $('nn').oninput = () => $('nc').textContent = `${$('nn').value.length}/1000`
+  $('nadd').onclick = async () => {
+    const t = $('nn').value.trim(); if (!t) return toast('Not boş.', true); if (!healthOk(t)) return
+    await run(() => q(sb.from('rv_client_note').insert({ client_id: cid, body: t })), 'Not kaydedildi'); clientDetail(cid)
+  }
+  $('dlgB').querySelectorAll('[data-ne]').forEach(b => b.onclick = () => {
+    const n = res.data.find(x => x.id === b.dataset.ne), box = $('dlgB').querySelector(`[data-note="${n.id}"]`)
+    box.innerHTML = `<textarea rows="3" maxlength="1000" style="width:100%">${esc(n.body)}</textarea><div class="row"><span class="grow" style="flex:1"></span><button class="btn s">Vazgeç</button><button class="btn s p">Kaydet</button></div>`
+    const [cancel, save] = box.querySelectorAll('button'), ta = box.querySelector('textarea')
+    cancel.onclick = () => clientDetail(cid)
+    save.onclick = async () => { const t = ta.value.trim(); if (!t) return toast('Not boş.', true); if (!healthOk(t)) return; await run(() => q(sb.from('rv_client_note').update({ body: t }).eq('id', n.id)), 'Not güncellendi'); clientDetail(cid) }
+  })
 }
 async function packageForm(c, p) {
   const sv = p?.services || []
@@ -519,14 +567,23 @@ async function packageForm(c, p) {
     clientDetail(c.id)
   }
 }
-async function makeSeries(c, p) {
-  const days = p.weekly_days, times = p.weekly_times.map(t => t.slice(0, 5))
-  const pairs = days.map((d, i) => [d, times[Math.min(i, times.length - 1)]])
+async function makeSeries(c, p, ser = []) {
+  // 10.11: Gün ve saat pencerede seçilir (paket programı boşsa da). Zaten serisi olan gün tekrar açılmaz (mükerrer randevu yok).
+  // Randevu yalnız personel "Oluştur"a basınca yazılır; paket kaydı tek başına randevu açmaz.
+  const times = (p.weekly_times || []).map(t => t.slice(0, 5)), days = p.weekly_days || []
+  const tOf = d => { const i = days.indexOf(d); return i < 0 ? (times[0] || '') : times[Math.min(i, times.length - 1)] || '' }
+  const has = d => ser.find(s => s.weekday === d && p.services.includes(s.service_code))
   dlg('Haftalık seri', `<p>${esc(c.full_name)} · ${esc(p.package_type)}</p><div class="grid2"><label class="f">Hizmet<select id="sss">${opts(p.services.map(x => [x, svc(x).name]), p.services[0])}</select></label>
     <label class="f">Eğitmen<select id="sst">${trnOpts(p.trainer_id, 'Belirtilmedi')}</select></label><label class="f">Başlangıç<input id="ssf" type="date" value="${p.starts_on > today() ? p.starts_on : today()}"></label></div>
-    <p>Oluşacak seriler: ${pairs.map(([d, t]) => `<span class="tag">${DAYS[d - 1]} ${t}</span>`).join(' ')}</p><p class="mute">Önümüzdeki 4 haftanın dersleri hemen yazılır; uygun grup seansı varsa ona eklenir, yoksa açılır. Kapasite, eğitmen çakışması ve paket hakkı denetlenir.</p><div id="ssr"></div>`,
-    `<button class="btn p" id="sso">Oluştur</button>`)
+    <p class="f mute" style="margin:10px 0 4px">Ders günleri ve saatleri (Simay'ın doğruladığı program)</p>
+    <div>${DAYS.map((d, i) => { const w = i + 1, x = has(w); return `<label class="row" style="gap:8px;margin:3px 0"><input type="checkbox" class="ssd" value="${w}" ${x ? 'disabled' : days.includes(w) ? 'checked' : ''}> <span style="width:34px">${d}</span>
+      ${x ? `<span class="tag g">serisi var · ${x.start_time.slice(0, 5)}</span>` : `<input class="sst" data-d="${w}" value="${esc(tOf(w))}" placeholder="18:00" style="width:80px">`}</label>` }).join('')}</div>
+    <p class="mute">Önümüzdeki 4 haftanın dersleri hemen yazılır; uygun grup seansı varsa ona eklenir, yoksa açılır. Kapasite, eğitmen çalışma saati, çakışma ve paket hakkı denetlenir.</p><div id="ssr"></div>`,
+    `<button class="btn" onclick="clientDetail('${c.id}')">Geri</button><button class="btn p" id="sso">Oluştur</button>`)
   $('sso').onclick = async () => {
+    const pairs = [...document.querySelectorAll('.ssd:checked')].map(x => [+x.value, document.querySelector(`.sst[data-d="${x.value}"]`).value.trim()])
+    if (!pairs.length) return toast('En az bir gün seçin.', true)
+    if (pairs.some(([, t]) => !/^\d{1,2}:\d\d$/.test(t))) return toast('Seçilen her gün için saati 18:00 biçiminde yazın.', true)
     const out = []
     await run(async () => {
       for (const [d, t] of pairs) {

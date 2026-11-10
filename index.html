@@ -245,7 +245,7 @@ async function dayView() {
   $('m').innerHTML = `<div class="bar"><button class="btn" onclick="S.day=addDays(S.day,-1);go('gun')">‹</button>
    <input type="date" value="${S.day}" onchange="S.day=this.value;go('gun')"><button class="btn" onclick="S.day=addDays(S.day,1);go('gun')">›</button>
    <button class="btn" onclick="S.day=today();go('gun')">Bugün</button><b>${esc(dayLabel(S.day))}</b><span class="grow"></span>${filters()}
-   <button class="btn p" onclick="newSession()">+ Seans</button></div>
+   <button class="btn p" onclick="quickBook(S.day)">+ Seans</button></div>
    ${hol.length ? `<div class="card"><span class="tag w">Tatil</span> ${esc(hol[0].note || '')}</div>` : ''}
    ${list.length ? list.map(sessCard).join('') : '<div class="card mute">Bu gün için seans yok.</div>'}`
 }
@@ -283,6 +283,75 @@ async function cancelB(id) {
     `<button class="btn d" id="cok">İptal et</button>`)
   $('cok').onclick = async () => { await run(() => q(sb.rpc('rv_cancel_booking', { p_booking: id, p_reason: $('cr').value || null })), 'İptal edildi'); closeDlg(); go(S.view, true) }
 }
+// ------------------------------------------------------------ hızlı randevu (14): günlük "+ Randevu" ve haftalık gün/kart tıklaması AYNI fonksiyonu kullanır
+// Kayıt sunucudaki mevcut iki fonksiyonla yapılır: rv_session_at (o saatteki seansı bulur, yoksa açar) + rv_book (randevu).
+// Kapasite, eğitmen/cihaz çakışması, aynı danışanın aynı saatte ikinci randevusu, aynı derse çift kayıt ve paket hakkı/tarihi veritabanında denetlenir.
+// Arayüz ayrıca önceden gösterir: mevcut gruba eklenecek mi, yeni seans mı açılacak, grup dolu mu. Çift tıklamada ikinci gönderim yapılmaz.
+async function quickBook(day, time, code) {
+  let C = null, busy = false
+  dlg('Yeni randevu', `<label class="f">Danışan</label><div id="qbc"></div>
+    <div class="grid2" style="margin-top:8px"><label class="f">Hizmet<select id="qbs">${svcOpts(code || S.svc)}</select></label>
+    <label class="f">Eğitmen<select id="qbt"></select></label>
+    <label class="f">Tarih<input id="qbd" type="date" value="${day || S.day}"></label>
+    <label class="f">Başlangıç saati<input id="qbh" type="time" step="300" value="${time || ''}"></label></div>
+    <div id="qbp"></div><div id="qbx" style="margin-top:8px"></div>
+    <p class="mute" style="margin-top:10px;font-size:13px">Danışan listede yoksa <button class="btn s" id="qbn">Yeni danışan kaydı</button> · Danışansız boş seans için <button class="btn s" id="qbe">Boş seans aç</button>${day ? ` · <button class="btn s" id="qbg">Gün görünümü</button>` : ''}</p>`,
+    `<button class="btn" onclick="closeDlg()">Vazgeç</button><button class="btn p" id="qbo" disabled>Randevu oluştur</button>`)
+  const v = () => ({ s: $('qbs').value, t: $('qbt').value || null, d: $('qbd').value, h: $('qbh').value })
+  let state = {}
+  const setTrainers = (keep) => { const cur = keep ?? $('qbt').value, list = S.trainers.filter(t => t.active && (!t.services.length || t.services.includes($('qbs').value)));
+    $('qbt').innerHTML = opts(list.map(t => [t.id, t.name]), cur || (list.length === 1 ? list[0].id : ''), 'Eğitmen yok / sonra') }
+  const pickUI = () => pickClient('qbc', c => { C = c
+    $('qbc').innerHTML = `<div class="part"><span class="n"><b>${esc(c.full_name)}</b> <span class="mute">${esc(c.phone || 'telefon yok')}</span></span><button class="btn s" id="qbch">Değiştir</button></div>`
+    $('qbch').onclick = () => { C = null; pickUI(); refresh() }; refresh() })
+  async function refresh() {
+    const x = v(), btn = $('qbo'); if (!btn) return
+    let msg = '', ok = !!C && !!x.s && !!x.d && /^\d\d:\d\d$/.test(x.h || '')
+    if (x.h && (x.h < '06:00' || x.h > '23:00')) { ok = false; msg = '<span class="tag b">Geçersiz saat</span>' }
+    state = { sess: null, full: false }
+    if (x.s && x.d && /^\d\d:\d\d$/.test(x.h || '')) {
+      const ss = await q(sb.from('rv_session').select('id,trainer_id,capacity,rv_booking(id,client_id,status,rv_client(full_name))').eq('service_code', x.s).eq('status', 'active').eq('starts_at', new Date(iso(x.d, x.h)).toISOString()))
+      const withRoom = ss.find(s => live(s).length < s.capacity), any = ss[0]
+      if (any) {
+        const sx = withRoom || any, ppl = live(sx), names = ppl.map(b => b.rv_client?.full_name).filter(Boolean)
+        if (C && ss.some(s => live(s).some(b => b.client_id === C.id))) { ok = false; msg = `<span class="tag b">Bu danışan bu seansta zaten kayıtlı</span>` }
+        else if (!withRoom) { ok = false; state.full = true; msg = `<span class="tag b">Grup dolu (${ppl.length}/${sx.capacity})</span> Başka saat seçin.` }
+        else { state.sess = sx; msg = `<span class="tag g">Mevcut gruba eklenecek</span> ${esc(svc(x.s).name)} · ${esc(trn(sx.trainer_id))} · ${ppl.length}/${sx.capacity}${names.length ? ' — ' + esc(names.join(', ')) : ''}`
+          if (sx.trainer_id && x.t !== sx.trainer_id) setTrainers(sx.trainer_id) }
+      } else msg = `<span class="tag">Yeni seans açılacak</span> ${esc(svc(x.s).name)} ${esc(x.h)} · ${esc(trn(x.t))} · kapasite ${svc(x.s).capacity}`
+    }
+    $('qbx').innerHTML = msg
+    if (C && x.s && x.d) {
+      const pk = await q(sb.from('rv_package_status').select('*').eq('client_id', C.id).eq('active', true))
+      const fit = pk.filter(p => p.services.includes(x.s) && p.starts_on <= x.d && (!p.ends_on || p.ends_on >= x.d))
+      const prev = $('qbpp')?.value
+      $('qbp').innerHTML = `<label class="f" style="margin-top:8px">Paket<select id="qbpp">${opts(fit.map(p => [p.id, `${p.package_type} — kalan ${p.total_sessions - p.used - p.reserved}`]), prev && fit.some(p => p.id === prev) ? prev : fit[0]?.id, 'Paketsiz (deneme / tek seans)')}</select></label>
+        ${pk.length && !fit.length ? '<p class="mute">Danışanın bu hizmeti ve tarihi kapsayan aktif paketi yok.</p>' : ''}`
+    } else $('qbp').innerHTML = ''
+    btn.disabled = !ok || busy
+  }
+  setTrainers(S.trainer); pickUI(); refresh()
+  for (const id of ['qbs', 'qbd', 'qbh']) $(id).onchange = () => { if (id === 'qbs') setTrainers(''); refresh() }
+  $('qbt').onchange = refresh
+  $('qbn').onclick = () => clientForm()
+  $('qbe').onclick = () => newSession($('qbd').value, $('qbh').value || undefined, $('qbs').value)
+  if ($('qbg')) $('qbg').onclick = () => { closeDlg(); S.day = $('qbd').value; go('gun') }
+  $('qbo').onclick = async () => {
+    if (busy) return
+    busy = true; $('qbo').disabled = true; $('qbo').textContent = 'Kaydediliyor…'
+    const x = v(), st = new Date(iso(x.d, x.h)).toISOString(), pkg = $('qbpp')?.value || null
+    try {
+      await refresh(); if (state.full) throw new Error('Grup dolu')
+      const created = !state.sess
+      const sid = await q(sb.rpc('rv_session_at', { p_service: x.s, p_trainer: state.sess ? null : x.t, p_resource: null, p_starts: st }))
+      try { await q(sb.rpc('rv_book', { p_session: sid, p_client: C.id, p_package: pkg })) }
+      catch (e) { if (created) await sb.from('rv_session').update({ status: 'cancelled', note: 'hızlı randevu kaydedilemedi' }).eq('id', sid).eq('status', 'active'); throw e }   // yeni açılan boş seans takvimde kalmaz
+      toast(`Randevu oluşturuldu: ${C.full_name} · ${svc(x.s).name} · ${x.d.slice(8)}.${x.d.slice(5, 7)} ${x.h}`)
+      closeDlg(); S.day = x.d; go(S.view, true)
+    } catch (e) { toast(errText(e), true); busy = false; if ($('qbo')) { $('qbo').textContent = 'Randevu oluştur'; refresh() } }
+  }
+}
+
 async function newSession(day, time, code) {
   dlg('Yeni seans', `<div class="grid2"><label class="f">Hizmet<select id="ns">${svcOpts(code || S.svc)}</select></label>
     <label class="f">Eğitmen<select id="nt">${trnOpts(S.trainer, 'Eğitmen yok / sonra')}</select></label>
@@ -373,9 +442,9 @@ async function weekView() {
   $('m').innerHTML = `<div class="bar"><button class="btn" onclick="S.day=addDays(S.day,-7);go('hafta')">‹</button><b>${esc(dayLabel(m0))} haftası</b><button class="btn" onclick="S.day=addDays(S.day,7);go('hafta')">›</button>
     <button class="btn" onclick="S.day=today();go('hafta')">Bu hafta</button><span class="grow"></span>${filters()}
     <button class="btn" onclick="copyWeek('${m0}')">Haftayı sonraki haftaya kopyala</button><button class="btn" onclick="extendSeries()">Serileri 4 hafta uzat</button></div>
-    <div class="week">${cols.map((d, i) => `<div class="col"><h4 onclick="S.day='${d}';go('gun')">${DAYS[i]} ${d.slice(8)}.${d.slice(5, 7)}</h4>
+    <div class="week">${cols.map((d, i) => `<div class="col" onclick="if(event.target===this)quickBook('${d}')"><h4><span onclick="S.day='${d}';go('gun')">${DAYS[i]} ${d.slice(8)}.${d.slice(5, 7)}</span> <button class="btn s p" title="Bu güne randevu" onclick="event.stopPropagation();quickBook('${d}')">+</button></h4>
       ${list.filter(s => ymd(new Date(s.starts_at)) === d).map(weekCard).join('') || '<span class="mute">—</span>'}</div>`).join('')}</div>
-    <p class="mute">Yeşil: boş yer var · Sarı: kısmen dolu · Kırmızı: dolu. İsimler yalnız panel personeline görünür. Bir karta dokunun, gün görünümü açılır.</p>`
+    <p class="mute">Yeşil: boş yer var · Sarı: kısmen dolu · Kırmızı: dolu. İsimler yalnız panel personeline görünür. Güne ya da "+"ya dokunun: o güne randevu formu açılır. Karta dokunun: o seansa danışan eklenir. Gün adına dokunun: gün görünümü.</p>`
 }
 // 011: Haftalık kartta hizmet, saat, eğitmen, kayıtlı/kapasite, durum ve bütün danışan adları (aynı danışan bir kez).
 const ATT = { booked: '', attended: '✓', no_show: '✗' }
@@ -383,7 +452,7 @@ function weekCard(s) {
   const seen = new Set(), ppl = live(s).filter(b => !seen.has(b.client_id) && seen.add(b.client_id)), n = ppl.length
   const names = ppl.map(b => `<li>${esc(b.rv_client?.full_name || '—')} ${ATT[b.status] ? `<span class="tag ${b.status === 'attended' ? 'g' : 'b'}">${ATT[b.status]}</span>` : ''}</li>`).join('')
   const past = new Date(s.starts_at) < new Date(), open = past && ppl.some(b => b.status === 'booked')
-  return `<div class="s ${n >= s.capacity ? 'full' : n ? 'part' : ''}" onclick="S.day='${ymd(new Date(s.starts_at))}';go('gun')"><b>${hm(s.starts_at)}</b> ${esc(svc(s.service_code).name)}<br>
+  return `<div class="s ${n >= s.capacity ? 'full' : n ? 'part' : ''}" title="Bu seansa danışan ekle" onclick="quickBook('${ymd(new Date(s.starts_at))}','${hm(s.starts_at)}','${s.service_code}')"><b>${hm(s.starts_at)}</b> ${esc(svc(s.service_code).name)}<br>
     <span class="mute">${esc(trn(s.trainer_id))} · ${n} danışan · ${n}/${s.capacity}${n >= s.capacity ? ' dolu' : ''}${open ? ' · <b>yoklama bekliyor</b>' : ''}</span>
     ${n ? (n > 5 ? `<details onclick="event.stopPropagation()"><summary>${n} isim</summary><ol class="wk">${names}</ol></details>` : `<ol class="wk">${names}</ol>`) : ''}</div>`
 }

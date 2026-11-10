@@ -41,6 +41,7 @@ input,select,textarea{border:1px solid var(--line);border-radius:9px;padding:7px
 .week .col h4{margin:0 0 6px;font-size:13px;color:var(--mute);font-weight:600;cursor:pointer}
 .week .s{border-radius:8px;padding:5px 7px;margin-bottom:5px;font-size:12.5px;cursor:pointer;background:var(--free)}
 .week .s.full{background:var(--full)}.week .s.part{background:#fff6e0}
+.week ol.wk{margin:3px 0 0 16px;padding:0;font-size:12px}.week ol.wk li{margin:1px 0}
 table{border-collapse:collapse;width:100%}td,th{padding:7px 6px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{font-size:12px;color:var(--mute);font-weight:600}
 .grid2{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px}
 label.f{display:flex;flex-direction:column;gap:3px;font-size:13px;color:var(--mute)}label.f>*{color:var(--ink)}
@@ -127,6 +128,11 @@ async function boot() {
   if (RECOVERY) return setPassword()
   S.me = session.user
   const st = await sb.from('rv_staff').select('role,display_name,active').eq('user_id', S.me.id).maybeSingle()
+  if (st.data && st.data.active && st.data.role === 'trainer') {   // 011: eğitmen yalnız kendi seanslarını görür (veritabanı fonksiyonu üzerinden)
+    S.role = 'trainer'; S.name = st.data.display_name; S.view = 'tbugun'; trainerShell(); go(S.view)
+    if (!S.timer) S.timer = setInterval(() => { if (!document.hidden && !$('dlg').open) go(S.view, true) }, 60000)
+    return
+  }
   if (!st.data || !st.data.active || !['staff', 'admin'].includes(st.data.role)) {
     $('app').innerHTML = `<div class="login"><div class="card"><h3>Yetki bekleniyor</h3><p class="mute">Bu hesap (${esc(S.me.email)}) randevu paneline henüz yetkilendirilmedi. İşletme sahibinden yetki isteyin.</p><button class="btn" onclick="logout()">Çıkış</button></div></div>`
     return
@@ -205,7 +211,7 @@ async function loadRef() {
 }
 
 function shell() {
-  const tabs = [['talep', 'Talepler<span id="tcount"></span>'], ['gun', 'Gün'], ['hafta', 'Hafta'], ['bos', 'Boş yerler'], ['danisan', 'Danışanlar'], ['paket', 'Paketler<span id="pcount"></span>'], ['ayar', 'Ayarlar'], ['gecmis', 'Geçmiş']]
+  const tabs = [['talep', 'Talepler<span id="tcount"></span>'], ['gun', 'Gün'], ['hafta', 'Hafta'], ['bos', 'Boş yerler'], ['danisan', 'Danışanlar'], ['yoklama', 'Yoklama'], ['paket', 'Paketler<span id="pcount"></span>'], ['ayar', 'Ayarlar'], ['gecmis', 'Geçmiş']]
   $('app').innerHTML = `<header><b>VITA Randevu</b><span class="who">${esc(S.name)} · ${S.role === 'admin' ? 'Yönetici' : 'Personel'}</span><button onclick="changePassword()">Şifre</button><button onclick="logout()">Çıkış</button></header>
   <nav>${tabs.map(([k, t]) => `<button data-v="${k}" onclick="go('${k}')">${t}</button>`).join('')}</nav><main id="m"></main>`
 }
@@ -213,8 +219,9 @@ function go(v, quiet) {
   S.view = v
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.v === v))
   if (!quiet) $('m').innerHTML = '<p class="mute">Yükleniyor…</p>'
+  if (S.role === 'trainer') return ({ tbugun: () => trainerView(0), thafta: () => trainerView(1) }[v] || (() => trainerView(0)))().catch(e => { $('m').innerHTML = `<div class="card">${esc(errText(e))}</div>` })
   talepCount(); pkgCount()
-  return ({ talep: talepView, gun: dayView, hafta: weekView, bos: freeView, danisan: clientsView, paket: packageAlertsView, ayar: settingsView, gecmis: historyView }[v])().catch(e => { $('m').innerHTML = `<div class="card">${esc(errText(e))}</div>` })
+  return ({ yoklama: attendanceView, talep: talepView, gun: dayView, hafta: weekView, bos: freeView, danisan: clientsView, paket: packageAlertsView, ayar: settingsView, gecmis: historyView }[v])().catch(e => { $('m').innerHTML = `<div class="card">${esc(errText(e))}</div>` })
 }
 function filters() {
   return `<select onchange="S.svc=this.value;go(S.view)">${svcOpts(S.svc, 'Tüm hizmetler')}</select>
@@ -222,7 +229,7 @@ function filters() {
 }
 async function sessions(fromDay, toDay, withPeople) {
   let p = sb.from('rv_session').select(withPeople
-      ? 'id,service_code,trainer_id,resource_id,starts_at,ends_at,capacity,status,note,rv_booking(id,client_id,status,kind,package_id,series_id,rv_client(full_name,phone))'
+      ? 'id,service_code,trainer_id,resource_id,starts_at,ends_at,capacity,status,note,rv_booking(id,client_id,status,kind,package_id,series_id,att_by_name,att_at,att_note,rv_client(full_name,phone))'
       : 'id,service_code,trainer_id,starts_at,ends_at,capacity,status,rv_booking(id,status)')
     .gte('starts_at', iso(fromDay, '00:00')).lt('starts_at', iso(addDays(toDay, 1), '00:00')).eq('status', 'active').order('starts_at')
   if (S.svc) p = p.eq('service_code', S.svc)
@@ -249,14 +256,25 @@ function sessCard(s) {
    <span class="grow" style="flex:1"></span><div class="occ ${n >= s.capacity ? 'full' : ''}"><i style="width:${pct}%"></i></div>
    <span class="tag ${n >= s.capacity ? 'b' : 'g'}">${n}/${s.capacity}${n >= s.capacity ? ' dolu' : ` · ${s.capacity - n} boş`}</span></div>
    ${people.map(b => `<div class="part ${b.status === 'cancelled' ? 'c' : ''}"><span class="n">${esc(b.rv_client?.full_name)} ${b.kind === 'makeup' ? '<span class="tag">telafi</span>' : ''} ${b.series_id ? '<span class="tag">seri</span>' : ''}</span>
-     <span class="tag ${b.status === 'cancelled' ? 'b' : b.status === 'attended' ? 'g' : ''}">${ST[b.status]}</span>
+     <span class="tag ${b.status === 'cancelled' ? 'b' : b.status === 'attended' ? 'g' : ''}">${ST[b.status]}</span>${b.att_by_name && ['attended', 'no_show'].includes(b.status) ? `<span class="mute" style="font-size:12px">${esc(b.att_by_name)}${b.att_note ? ' · ' + esc(b.att_note) : ''}</span>` : ''}
      ${b.status !== 'cancelled' ? `<button class="btn s" onclick="mark('${b.id}','attended')">Geldi</button><button class="btn s" onclick="mark('${b.id}','no_show')">Gelmedi</button>
        <button class="btn s" onclick="moveDlg('${b.id}','${s.service_code}',false)">Taşı</button><button class="btn s" onclick="moveDlg('${b.id}','${s.service_code}',true)">Telafi</button>
        <button class="btn s d" onclick="cancelB('${b.id}')">İptal</button>` : ''}</div>`).join('')}
    <div class="row" style="margin-top:8px">${n < s.capacity ? `<button class="btn s p" onclick="addPerson('${s.id}','${s.service_code}','${s.starts_at}')">+ Danışan ekle</button>` : ''}
    <button class="btn s" onclick="editSession('${s.id}')">Düzenle</button></div></div>`
 }
-async function mark(id, st) { await run(() => q(sb.from('rv_booking').update({ status: st }).eq('id', id)), st === 'attended' ? 'Geldi işaretlendi' : 'Gelmedi işaretlendi'); go(S.view, true) }
+async function mark(id, st, after) {
+  const done = after || (() => go(S.view, true))
+  if (st === 'attended') { await run(() => q(sb.from('rv_booking').update({ status: st, att_note: null }).eq('id', id)), 'Geldi işaretlendi'); return done() }
+  if (st === 'booked') { await run(() => q(sb.from('rv_booking').update({ status: st }).eq('id', id)), 'Yoklama kaldırıldı'); return done() }
+  noShowDlg(async note => { await run(() => q(sb.from('rv_booking').update({ status: 'no_show', att_note: note }).eq('id', id)), 'Gelmedi işaretlendi'); closeDlg(); done() })
+}
+function noShowDlg(save) {
+  dlg('Gelmedi — açıklama', `<label class="f">Neden gelmedi? (zorunlu)<textarea id="nsr" rows="2" maxlength="300" style="width:100%" placeholder="ör. Danışan önceden haber verdi"></textarea></label>
+    <p class="mute">Bilinmiyorsa uydurmayın: "Nedeni bilinmiyor" yazın. Sağlık bilgisi yazmayın.</p>`, `<button class="btn" id="nsu">Nedeni bilinmiyor</button><button class="btn p" id="nso">Kaydet</button>`)
+  $('nsu').onclick = () => { $('nsr').value = 'Nedeni bilinmiyor' }
+  $('nso').onclick = () => { const v = $('nsr').value.trim(); if (!v) return toast('Gelmedi için açıklama zorunlu.', true); save(v) }
+}
 async function cancelB(id) {
   const bk = await q(sb.from('rv_booking').select('package_id,rv_session(starts_at)').eq('id', id).single())
   const late = bk.package_id && ymd(new Date(bk.rv_session.starts_at)) <= today()
@@ -350,14 +368,24 @@ async function moveDlg(bid, code, makeup) {
 
 // ------------------------------------------------------------ hafta
 async function weekView() {
-  const m0 = monday(S.day), list = await sessions(m0, addDays(m0, 6), false)
+  const m0 = monday(S.day), list = await sessions(m0, addDays(m0, 6), true)
   const cols = [...Array(7)].map((_, i) => addDays(m0, i))
   $('m').innerHTML = `<div class="bar"><button class="btn" onclick="S.day=addDays(S.day,-7);go('hafta')">‹</button><b>${esc(dayLabel(m0))} haftası</b><button class="btn" onclick="S.day=addDays(S.day,7);go('hafta')">›</button>
     <button class="btn" onclick="S.day=today();go('hafta')">Bu hafta</button><span class="grow"></span>${filters()}
     <button class="btn" onclick="copyWeek('${m0}')">Haftayı sonraki haftaya kopyala</button><button class="btn" onclick="extendSeries()">Serileri 4 hafta uzat</button></div>
     <div class="week">${cols.map((d, i) => `<div class="col"><h4 onclick="S.day='${d}';go('gun')">${DAYS[i]} ${d.slice(8)}.${d.slice(5, 7)}</h4>
-      ${list.filter(s => ymd(new Date(s.starts_at)) === d).map(s => { const n = live(s).length; return `<div class="s ${n >= s.capacity ? 'full' : n ? 'part' : ''}" onclick="S.day='${d}';go('gun')"><b>${hm(s.starts_at)}</b> ${esc(svc(s.service_code).name)}<br><span class="mute">${esc(trn(s.trainer_id))} · ${n}/${s.capacity}</span></div>` }).join('') || '<span class="mute">—</span>'}</div>`).join('')}</div>
-    <p class="mute">Yeşil: boş yer var · Sarı: kısmen dolu · Kırmızı: dolu. Bir güne dokunun, gün görünümü açılır.</p>`
+      ${list.filter(s => ymd(new Date(s.starts_at)) === d).map(weekCard).join('') || '<span class="mute">—</span>'}</div>`).join('')}</div>
+    <p class="mute">Yeşil: boş yer var · Sarı: kısmen dolu · Kırmızı: dolu. İsimler yalnız panel personeline görünür. Bir karta dokunun, gün görünümü açılır.</p>`
+}
+// 011: Haftalık kartta hizmet, saat, eğitmen, kayıtlı/kapasite, durum ve bütün danışan adları (aynı danışan bir kez).
+const ATT = { booked: '', attended: '✓', no_show: '✗' }
+function weekCard(s) {
+  const seen = new Set(), ppl = live(s).filter(b => !seen.has(b.client_id) && seen.add(b.client_id)), n = ppl.length
+  const names = ppl.map(b => `<li>${esc(b.rv_client?.full_name || '—')} ${ATT[b.status] ? `<span class="tag ${b.status === 'attended' ? 'g' : 'b'}">${ATT[b.status]}</span>` : ''}</li>`).join('')
+  const past = new Date(s.starts_at) < new Date(), open = past && ppl.some(b => b.status === 'booked')
+  return `<div class="s ${n >= s.capacity ? 'full' : n ? 'part' : ''}" onclick="S.day='${ymd(new Date(s.starts_at))}';go('gun')"><b>${hm(s.starts_at)}</b> ${esc(svc(s.service_code).name)}<br>
+    <span class="mute">${esc(trn(s.trainer_id))} · ${n} danışan · ${n}/${s.capacity}${n >= s.capacity ? ' dolu' : ''}${open ? ' · <b>yoklama bekliyor</b>' : ''}</span>
+    ${n ? (n > 5 ? `<details onclick="event.stopPropagation()"><summary>${n} isim</summary><ol class="wk">${names}</ol></details>` : `<ol class="wk">${names}</ol>`) : ''}</div>`
 }
 async function copyWeek(m0) {
   dlg('Haftayı kopyala', `<p>${esc(dayLabel(m0))} haftasındaki seanslar bir sonraki haftaya kopyalanır. Zaten olan seanslar tekrar oluşturulmaz.</p>
@@ -373,7 +401,9 @@ async function extendSeries() {
   dlg('Serileri uzat', `<p>${ser.length} aktif seri için önümüzdeki 4 haftanın dersleri oluşturulur. Tek tek iptal edilmiş dersler yeniden açılmaz; paket bitişi ve kalan seans dikkate alınır.</p><div id="esr"></div>`, `<button class="btn p" id="eso">Uzat</button>`)
   $('eso').onclick = async () => {
     let add = 0, errs = []
-    for (const s of ser) { const r = await q(sb.rpc('rv_series_generate', { p_series: s.id, p_until: addDays(today(), 28) })).catch(e => [{ o_result: errText(e) }]); for (const x of r) x.o_result === 'eklendi' ? add++ : x.o_result !== 'zaten var' && errs.push(`${x.o_day || ''} ${errText(x.o_result)}`) }
+    // 011: bütün seriler tarih sırasıyla tek çağrıda (paket hakkı günlere kronolojik dağılır)
+    const r = await q(sb.rpc('rv_series_generate_many', { p_series: ser.map(s => s.id), p_until: addDays(today(), 28) })).catch(e => [{ o_result: errText(e) }])
+    for (const x of r) x.o_result === 'eklendi' ? add++ : x.o_result !== 'zaten var' && errs.push(`${x.o_day || ''} ${errText(x.o_result)}`)
     $('esr').innerHTML = `<p><b>${add}</b> ders eklendi.</p>${errs.length ? `<p class="mute">Eklenemeyenler:</p><ul>${errs.map(e => `<li>${esc(e)}</li>`).join('')}</ul>` : ''}`
     $('dlgF').innerHTML = ''
   }
@@ -586,14 +616,82 @@ async function makeSeries(c, p, ser = []) {
     if (pairs.some(([, t]) => !/^\d{1,2}:\d\d$/.test(t))) return toast('Seçilen her gün için saati 18:00 biçiminde yazın.', true)
     const out = []
     await run(async () => {
-      for (const [d, t] of pairs) {
-        const s = await q(sb.from('rv_series').insert({ client_id: c.id, package_id: p.id, service_code: $('sss').value, trainer_id: $('sst').value || null, weekday: d, start_time: t, valid_from: $('ssf').value, valid_until: p.ends_on }).select('id').single())
-        const r = await q(sb.rpc('rv_series_generate', { p_series: s.id, p_until: addDays(today(), 28) }))
-        r.forEach(x => out.push(`${x.o_day} ${DAYS[d - 1]} ${t}: ${errText(x.o_result)}`))
-      }
+      const ids = []
+      for (const [d, t] of pairs) ids.push((await q(sb.from('rv_series').insert({ client_id: c.id, package_id: p.id, service_code: $('sss').value, trainer_id: $('sst').value || null, weekday: d, start_time: t, valid_from: $('ssf').value, valid_until: p.ends_on }).select('id').single())).id)
+      // 011: günler tarih sırasıyla üretilir; eskiden önce bütün Salılar dolup hak bitince Cumartesiler boş kalıyordu
+      const r = await q(sb.rpc('rv_series_generate_many', { p_series: ids, p_until: addDays(today(), 28) }))
+      r.forEach(x => out.push(`${x.o_day} ${DAYS[(new Date(x.o_day + 'T12:00:00Z').getUTCDay() + 6) % 7]}: ${errText(x.o_result)}`))
     }, 'Seri oluşturuldu')
     $('ssr').innerHTML = `<ul>${out.map(x => `<li>${esc(x)}</li>`).join('')}</ul>`; $('dlgF').innerHTML = `<button class="btn" onclick="clientDetail('${c.id}')">Danışana dön</button>`
   }
+}
+
+// ------------------------------------------------------------ eğitmen paneli (011)
+// Eğitmen tabloları doğrudan okuyamaz; yalnız rv_trainer_sessions (kendi seansları, ad soyad) ve rv_trainer_mark (Geldi/Gelmedi) çağrılır.
+function trainerShell() {
+  $('app').innerHTML = `<header><b>VITA Randevu</b><span class="who">${esc(S.name)} · Eğitmen</span><button onclick="changePassword()">Şifre</button><button onclick="logout()">Çıkış</button></header>
+  <nav><button data-v="tbugun" onclick="go('tbugun')">Bugün</button><button data-v="thafta" onclick="go('thafta')">Bu hafta</button></nav><main id="m"></main>`
+}
+async function trainerView(week) {
+  const from = week ? monday(today()) : today(), to = week ? addDays(from, 6) : today()
+  const rows = await q(sb.rpc('rv_trainer_sessions', { p_from: from, p_to: to }))
+  const by = new Map(); rows.forEach(r => { if (!by.has(r.session_id)) by.set(r.session_id, { ...r, people: [] }); if (r.booking_id) by.get(r.session_id).people.push(r) })
+  const soon = t => new Date(t).getTime() <= Date.now() + 15 * 60000
+  $('m').innerHTML = `<div class="bar"><b>${week ? esc(dayLabel(from)) + ' haftası' : esc(dayLabel(from))}</b><span class="grow"></span><span class="mute">Yalnız size atanmış seanslar</span></div>` + ([...by.values()].map(s => `<div class="card">
+    <div class="row"><b>${week ? esc(dayLabel(ymd(new Date(s.starts_at)))) + ' · ' : ''}${hm(s.starts_at)}–${hm(s.ends_at)}</b><span>${esc(s.service_name)}</span><span class="grow" style="flex:1"></span><span class="tag">${s.people.length}/${s.capacity}</span></div>
+    ${s.people.map((b, i) => `<div class="part"><span class="n">${i + 1}. ${esc(b.client_name)}</span>${b.b_status === 'booked'
+      ? (soon(s.starts_at) ? `<button class="btn s p" data-tm="${b.booking_id}" data-st="attended">GELDİ</button><button class="btn s d" data-tm="${b.booking_id}" data-st="no_show">GELMEDİ</button>` : '<span class="mute">seans başlayınca işaretlenir</span>')
+      : `<span class="tag ${b.b_status === 'attended' ? 'g' : 'b'}">${ST[b.b_status]}</span><span class="mute" style="font-size:12px">${esc(b.att_note || '')}</span>`}</div>`).join('') || '<p class="mute">Kayıtlı danışan yok.</p>'}</div>`).join('') || '<div class="card mute">Bu aralıkta size atanmış seans yok.</div>')
+  $('m').querySelectorAll('[data-tm]').forEach(b => b.onclick = () => {
+    const save = async note => { await run(() => q(sb.rpc('rv_trainer_mark', { p_booking: b.dataset.tm, p_status: b.dataset.st, p_note: note || null })), 'Kaydedildi'); if ($('dlg').open) closeDlg(); go(S.view, true) }
+    b.dataset.st === 'attended' ? save() : noShowDlg(save)
+  })
+}
+
+// ------------------------------------------------------------ yoklama denetimi + haftalık özet (Simay, Murat)
+// Yalnız PT ve Reformer (Diyet ve VITA BODY bu yoklamanın dışında). Düzeltmeler rv_booking üzerinden; önceki/yeni değer rv_audit'te.
+S.att = { per: 'hafta', from: '', to: '', tr: '', st: '' }
+async function attendanceView() {
+  const A = S.att, m0 = monday(today())
+  const from = A.per === 'bugun' ? today() : A.per === 'hafta' ? m0 : (A.from || m0), to = A.per === 'bugun' ? today() : A.per === 'hafta' ? addDays(m0, 6) : (A.to || addDays(m0, 6))
+  const codes = S.services.filter(s => /^(PT|REF)/.test(s.code)).map(s => s.code)
+  const get = (f, t) => q(sb.from('rv_booking').select('id,client_id,status,att_by_name,att_at,att_note,rv_client(full_name),rv_session!inner(starts_at,service_code,trainer_id,status)')
+    .neq('status', 'cancelled').eq('rv_session.status', 'active').in('rv_session.service_code', codes).gte('rv_session.starts_at', iso(f, '00:00')).lt('rv_session.starts_at', iso(addDays(t, 1), '00:00')).limit(3000))
+  const counts = async () => { const n = async f => { let p = sb.from('rv_client').select('id', { count: 'exact', head: true }); if (f) p = f(p); const r = await p; if (r.error) throw r.error; return r.count }; const [a, b] = await Promise.all([n(), n(p => p.eq('active', true))]); return { all: a, act: b } }
+  const now = new Date()
+  const [rows, wk, cnt, pk, fb] = await Promise.all([get(from, to), get(m0, addDays(m0, 6)), counts(),
+    q(sb.from('rv_package_status').select('client_id,kind,package_type,rv_client(full_name,active)').eq('active', true).in('kind', ['pt', 'reformer'])),
+    q(sb.from('rv_booking').select('client_id,rv_session!inner(starts_at)').neq('status', 'cancelled').gte('rv_session.starts_at', now.toISOString()).limit(5000))])
+  const pend = b => b.status === 'booked' && new Date(b.rv_session.starts_at) < now
+  const lbl = b => b.status === 'attended' ? 'Geldi' : b.status === 'no_show' ? 'Gelmedi' : pend(b) ? 'İşaretlenmedi' : 'Planlı'
+  const list = rows.filter(b => (!A.tr || b.rv_session.trainer_id === A.tr) && (!A.st || lbl(b) === A.st)).sort((a, b) => a.rv_session.starts_at.localeCompare(b.rv_session.starts_at))
+  const wPast = wk.filter(b => new Date(b.rv_session.starts_at) < now), sess = new Set(wPast.map(b => b.rv_session.starts_at + '|' + b.rv_session.service_code + '|' + b.rv_session.trainer_id))
+  const g = wk.filter(b => b.status === 'attended').length, ng = wk.filter(b => b.status === 'no_show'), ie = wk.filter(pend)
+  const fut = new Set(fb.map(b => b.client_id)), seenC = new Set(), missing = pk.filter(p => p.rv_client?.active && !fut.has(p.client_id) && !seenC.has(p.client_id) && seenC.add(p.client_id))
+  const wd = b => `${esc(dayLabel(ymd(new Date(b.rv_session.starts_at))))} ${hm(b.rv_session.starts_at)}`
+  const row = b => `<tr${pend(b) ? ' style="background:#fff6e0"' : ''}><td>${esc(dayLabel(ymd(new Date(b.rv_session.starts_at))))}</td><td>${hm(b.rv_session.starts_at)}</td><td>${esc(trn(b.rv_session.trainer_id))}</td><td>${esc(b.rv_client?.full_name || '—')}</td><td>${esc(svc(b.rv_session.service_code).name)}</td>
+    <td><span class="tag ${b.status === 'attended' ? 'g' : b.status === 'no_show' ? 'b' : pend(b) ? 'w' : ''}">${lbl(b)}</span></td><td class="mute">${esc(b.att_note || '')}</td><td class="mute">${esc(b.att_by_name || '')}</td><td class="mute">${b.att_at ? esc(when(b.att_at)) : ''}</td>
+    <td>${new Date(b.rv_session.starts_at) < now ? `<button class="btn s" data-fix="${b.id}">Düzelt</button>` : ''}</td></tr>`
+  $('m').innerHTML = `<div class="card"><h3 style="margin-top:0">Bu hafta · PT ve Reformer <span class="mute" style="font-weight:400;font-size:13px">${esc(dayLabel(m0))} – ${esc(dayLabel(addDays(m0, 6)))}</span></h3><div class="row" style="gap:8px;flex-wrap:wrap">
+      <span class="tag">Toplam danışan ${cnt.all}</span><span class="tag g">Aktif ${cnt.act}</span><span class="tag">Pasif ${cnt.all - cnt.act}</span>
+      <span class="tag">Bu hafta randevusu olan ${new Set(wk.map(b => b.client_id)).size} kişi</span><span class="tag">Gerçekleşen seans ${sess.size}</span>
+      <span class="tag g">Geldi ${g}</span><span class="tag b">Gelmedi ${ng.length}</span><span class="tag w">Yoklaması yapılmamış ${ie.length}</span></div>
+    <details><summary>Gelmeyenler (${ng.length})</summary><ul>${ng.map(b => `<li>${esc(b.rv_client?.full_name)} · ${wd(b)} · ${esc(b.att_note || '')}</li>`).join('')}</ul></details>
+    <details><summary>Yoklaması yapılmamış (${ie.length})</summary><ul>${ie.map(b => `<li>${esc(b.rv_client?.full_name)} · ${wd(b)} · ${esc(trn(b.rv_session.trainer_id))}</li>`).join('')}</ul></details>
+    <details><summary>Aktif PT/Reformer paketi olup ileri randevusu olmayanlar (${missing.length})</summary><ul>${missing.map(p => `<li>${esc(p.rv_client.full_name)} · ${esc(KIND[p.kind])} · ${esc(p.package_type)}</li>`).join('')}</ul></details></div>
+  <div class="bar"><select id="ap">${opts([['bugun', 'Bugün'], ['hafta', 'Bu hafta'], ['aralik', 'Tarih aralığı']], A.per)}</select>${A.per === 'aralik' ? `<input type="date" id="af" value="${from}"><input type="date" id="at" value="${to}">` : ''}
+    <select id="atr">${opts(S.trainers.filter(t => t.services.some(c => /^(PT|REF)/.test(c))).map(t => [t.id, t.name]), A.tr, 'Tüm eğitmenler')}</select><select id="ast">${opts([['Geldi', 'Geldi'], ['Gelmedi', 'Gelmedi'], ['İşaretlenmedi', 'İşaretlenmedi'], ['Planlı', 'Planlı (henüz olmadı)']], A.st, 'Tüm durumlar')}</select>
+    <span class="grow"></span><span class="mute">${list.length} kayıt</span></div>
+  <div class="card" style="overflow-x:auto"><table><tr><th>Tarih</th><th>Saat</th><th>Eğitmen</th><th>Danışan</th><th>Hizmet</th><th>Durum</th><th>Gelmeme açıklaması</th><th>İşaretleyen</th><th>Zaman</th><th></th></tr>${list.map(row).join('') || '<tr><td colspan="10" class="mute">Kayıt yok.</td></tr>'}</table>
+  <p class="mute">Sarı satır: seans geçti, yoklama girilmedi. Düzeltmeler geçmişe (önceki ve yeni değer) kaydedilir.</p></div>`
+  $('ap').onchange = () => { A.per = $('ap').value; go('yoklama') }; $('atr').onchange = () => { A.tr = $('atr').value; go('yoklama') }; $('ast').onchange = () => { A.st = $('ast').value; go('yoklama') }
+  if ($('af')) { $('af').onchange = () => { A.from = $('af').value; go('yoklama') }; $('at').onchange = () => { A.to = $('at').value; go('yoklama') } }
+  $('m').querySelectorAll('[data-fix]').forEach(b => b.onclick = () => {
+    const x = rows.find(r => r.id === b.dataset.fix), back = () => go('yoklama', true)
+    dlg('Yoklamayı düzelt', `<p>${esc(x.rv_client?.full_name)} · ${wd(x)}</p><p class="mute">Şu an: ${lbl(x)}${x.att_note ? ' · ' + esc(x.att_note) : ''}</p>`,
+      `<button class="btn" id="fx0">İşaretlenmedi</button><button class="btn p" id="fx1">Geldi</button><button class="btn d" id="fx2">Gelmedi</button>`)
+    $('fx0').onclick = () => { closeDlg(); mark(x.id, 'booked', back) }; $('fx1').onclick = () => { closeDlg(); mark(x.id, 'attended', back) }; $('fx2').onclick = () => mark(x.id, 'no_show', back)
+  })
 }
 
 // ------------------------------------------------------------ ayarlar
@@ -648,11 +746,14 @@ async function packageAlertsView() {
 async function staffAccounts() {
   const st = await q(sb.rpc('rv_staff_accounts'))
   $('stf').innerHTML = `<table><tr><th>Ad</th><th>E-posta</th><th>Yetki</th><th>Şifre</th><th>Son giriş</th><th></th></tr>${st.map(x => `<tr><td>${esc(x.display_name)}</td><td class="mute">${esc(x.email)}</td>
-    <td>${x.role === 'admin' ? 'Yönetici' : x.role === 'ai' ? 'WhatsApp AI (yalnız müsaitlik)' : 'Personel'} ${x.active ? '' : '<span class="tag b">pasif</span>'}</td>
+    <td>${x.role === 'admin' ? 'Yönetici' : x.role === 'ai' ? 'WhatsApp AI (yalnız müsaitlik)' : x.role === 'trainer' ? 'Eğitmen (yalnız kendi seansları)' : 'Personel'} ${x.active ? '' : '<span class="tag b">pasif</span>'}</td>
     <td>${x.has_password ? '<span class="tag g">belirlendi</span>' : '<span class="tag w">yok</span>'}</td><td class="mute">${x.last_sign_in_at ? new Date(x.last_sign_in_at).toLocaleString('tr-TR', { timeZone: TZ }) : '—'}</td>
-    <td>${x.role === 'staff' ? `<button class="btn s p" data-pw="${x.user_id}" data-n="${esc(x.display_name)}">Şifre belirle</button>` : ''}</td></tr>`).join('')}</table>
+    <td>${['staff', 'trainer'].includes(x.role) ? `<button class="btn s p" data-pw="${x.user_id}" data-n="${esc(x.display_name)}">Şifre belirle</button>` : ''}</td></tr>`).join('')}</table>
     <p class="mute">Personelin şifresini buradan siz belirlersiniz; e-posta gerekmez. Şifreyi kişiye kendiniz iletin, kişi girdikten sonra üstteki "Şifre" düğmesiyle değiştirebilir.</p>`
   $('stf').querySelectorAll('[data-pw]').forEach(b => b.onclick = () => staffPasswordDlg(b.dataset.pw, b.dataset.n))
+  $('stf').insertAdjacentHTML('beforeend', `<h4>Eğitmen hesabı bağla</h4><p class="mute">Önce Supabase → Authentication'da eğitmenin kendi doğrulanmış e-postasıyla kullanıcı açın (e-posta uydurmayın). Sonra burada eğitmen kaydına bağlayın ve şifresini belirleyin. Eğitmen yalnız kendi seanslarını ve Geldi/Gelmedi'yi görür.</p>
+    <div class="grid2"><label class="f">E-posta<input id="tle" type="email"></label><label class="f">Eğitmen<select id="tlt">${opts(S.trainers.filter(t => t.active && t.services.some(c => /^(PT|REF)/.test(c))).map(t => [t.id, t.name]))}</select></label><label class="f">Görünen ad<input id="tln" placeholder="ör. Koray"></label></div><button class="btn p" id="tlo" style="margin-top:6px">Bağla</button>`)
+  $('tlo').onclick = async () => { if (!$('tle').value.trim() || !$('tln').value.trim()) return toast('E-posta ve ad gerekli.', true); await run(() => q(sb.rpc('rv_link_trainer', { p_email: $('tle').value, p_trainer: $('tlt').value, p_name: $('tln').value })), 'Eğitmen hesabı bağlandı'); staffAccounts() }
 }
 function staffPasswordDlg(uid, name) {
   dlg(`Şifre belirle: ${name}`, `<p class="mute">Yeni şifreyi iki kez yazın (en az 8 karakter, başında/sonunda boşluk olmasın). Kaydedilince bu kişi e-postası ve bu şifreyle hemen girebilir.</p>

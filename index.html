@@ -309,7 +309,7 @@ async function quickBook(day, time, code) {
     let msg = '', ok = !!C && !!x.s && !!x.d && /^\d\d:\d\d$/.test(x.h || '')
     if (x.h && (x.h < '06:00' || x.h > '23:00')) { ok = false; msg = '<span class="tag b">Geçersiz saat</span>' }
     state = { sess: null, full: false }
-    if (x.s && x.d && /^\d\d:\d\d$/.test(x.h || '')) {
+    if (x.s && x.d && /^\d\d:\d\d$/.test(x.h || '') && x.h >= '06:00' && x.h <= '23:00') {
       const ss = await q(sb.from('rv_session').select('id,trainer_id,capacity,rv_booking(id,client_id,status,rv_client(full_name))').eq('service_code', x.s).eq('status', 'active').eq('starts_at', new Date(iso(x.d, x.h)).toISOString()))
       const withRoom = ss.find(s => live(s).length < s.capacity), any = ss[0]
       if (any) {
@@ -325,7 +325,7 @@ async function quickBook(day, time, code) {
       const pk = await q(sb.from('rv_package_status').select('*').eq('client_id', C.id).eq('active', true))
       const fit = pk.filter(p => p.services.includes(x.s) && p.starts_on <= x.d && (!p.ends_on || p.ends_on >= x.d))
       const prev = $('qbpp')?.value
-      $('qbp').innerHTML = `<label class="f" style="margin-top:8px">Paket<select id="qbpp">${opts(fit.map(p => [p.id, `${p.package_type} — kalan ${p.total_sessions - p.used - p.reserved}`]), prev && fit.some(p => p.id === prev) ? prev : fit[0]?.id, 'Paketsiz (deneme / tek seans)')}</select></label>
+      $('qbp').innerHTML = `<label class="f" style="margin-top:8px">Paket<select id="qbpp">${opts(fit.map(p => [p.id, `${p.package_type} — kalan ${p.total_sessions - p.used - p.reserved}`]), prev && fit.some(p => p.id === prev) ? prev : (fit.find(p => p.total_sessions - p.used - p.reserved > 0) || fit[0])?.id, 'Paketsiz (deneme / tek seans)')}</select></label>
         ${pk.length && !fit.length ? '<p class="mute">Danışanın bu hizmeti ve tarihi kapsayan aktif paketi yok.</p>' : ''}`
     } else $('qbp').innerHTML = ''
     btn.disabled = !ok || busy

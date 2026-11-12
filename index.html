@@ -615,10 +615,11 @@ async function clientsView() {
 }
 async function clientForm(c) {
   dlg(c ? 'Danışanı düzenle' : 'Yeni danışan', `<div class="grid2"><label class="f">Ad soyad<input id="fn" value="${esc(c?.full_name || '')}"></label><label class="f">Telefon<input id="fp" inputmode="tel" value="${esc(c?.phone || '')}" placeholder="05xx xxx xx xx"></label>
-    ${c ? `<label class="f">Durum<select id="fa">${opts([['true', 'Aktif'], ['false', 'Pasif']], String(c.active))}</select></label>` : ''}</div><p id="fw" class="mute">Sağlık bilgisi bu panele yazılmaz.</p>`, `<button class="btn p" id="fok">Kaydet</button>`)
+    ${c ? `<label class="f">Durum<select id="fa">${opts([['true', 'Aktif'], ['false', 'Pasif']], String(c.active))}</select></label>` : ''}<label class="f">WhatsApp hitabı<select id="fh">${opts([['Hanımefendi', 'Hanımefendi'], ['Beyefendi', 'Beyefendi']], c?.hitap || '', 'Belirtilmedi (Reformer → Hanımefendi)')}</select></label></div><p id="fw" class="mute">Sağlık bilgisi bu panele yazılmaz.</p>`, `<button class="btn p" id="fok">Kaydet</button>`)
   $('fp').onblur = async () => { const p = phoneNorm($('fp').value); if (!p) return; const d = await q(sb.from('rv_client').select('id,full_name').eq('phone', p)); const o = d.filter(x => x.id !== c?.id); $('fw').innerHTML = o.length ? `<span class="tag w">Bu telefon kayıtlı: ${esc(o.map(x => x.full_name).join(', '))}</span>` : 'Sağlık bilgisi bu panele yazılmaz.' }
   $('fok').onclick = async () => {
     const row = { full_name: $('fn').value.trim(), phone: phoneNorm($('fp').value) }
+    if ($('fh')) row.hitap = $('fh').value || null   // 018: AI aktif danışana bu hitapla yazar
     if (c) row.active = $('fa').value === 'true'
     if (c?.active && !row.active && !$('fok').dataset.ok) {   // 017: pasif = ileri seanslar kapanır
       const n = (await q(sb.from('rv_booking').select('id,rv_session!inner(starts_at)').eq('client_id', c.id).eq('status', 'booked').gt('rv_session.starts_at', new Date().toISOString())).catch(() => [])).length

@@ -92,6 +92,9 @@ function monday(s) { const d = new Date(s + 'T12:00:00+03:00'); const w = (d.get
 function iso(day, time) { return `${day}T${time.length === 5 ? time + ':00' : time}+03:00` }
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])) }
 function svc(code) { return S.services.find(x => x.code === code) || { name: code } }
+// 017: diyet ve bölgesel incelme kontenjansız (aynı saate çok danışan, aynı personele çok seans)
+const unl = code => !!svc(code).unlimited
+const capTag = (s, n) => unl(s.service_code) ? `<span class="tag g">${n} danışan · kontenjansız</span>` : `<span class="tag ${n >= s.capacity ? 'b' : 'g'}">${n}/${s.capacity}${n >= s.capacity ? ' dolu' : ` · ${s.capacity - n} boş`}</span>`
 function trn(id) { return S.trainers.find(x => x.id === id)?.name || '—' }
 function $(id) { return document.getElementById(id) }
 function toast(msg, bad) { const t = $('toast'); t.textContent = msg; t.className = 'on' + (bad ? ' bad' : ''); clearTimeout(t._h); t._h = setTimeout(() => t.className = '', bad ? 6000 : 2600) }
@@ -229,7 +232,7 @@ function filters() {
 }
 async function sessions(fromDay, toDay, withPeople) {
   let p = sb.from('rv_session').select(withPeople
-      ? 'id,service_code,trainer_id,resource_id,starts_at,ends_at,capacity,status,note,rv_booking(id,client_id,status,kind,package_id,series_id,att_by_name,att_at,att_note,rv_client(full_name,phone))'
+      ? 'id,service_code,trainer_id,resource_id,starts_at,ends_at,capacity,status,note,rv_booking(id,client_id,status,kind,package_id,series_id,cancel_reason,att_by_name,att_at,att_note,rv_client(full_name,phone))'
       : 'id,service_code,trainer_id,starts_at,ends_at,capacity,status,rv_booking(id,status)')
     .gte('starts_at', iso(fromDay, '00:00')).lt('starts_at', iso(addDays(toDay, 1), '00:00')).eq('status', 'active').order('starts_at')
   if (S.svc) p = p.eq('service_code', S.svc)
@@ -250,17 +253,17 @@ async function dayView() {
    ${list.length ? list.map(sessCard).join('') : '<div class="card mute">Bu gün için seans yok.</div>'}`
 }
 function sessCard(s) {
-  const n = live(s).length, pct = Math.min(100, Math.round(100 * n / s.capacity))
-  const people = (s.rv_booking || []).sort((a, b) => (a.status === 'cancelled') - (b.status === 'cancelled'))
+  const n = live(s).length, u = unl(s.service_code), pct = u ? 0 : Math.min(100, Math.round(100 * n / s.capacity))
+  const people = (s.rv_booking || []).filter(b => !(b.status === 'cancelled' && (b.cancel_reason || '').startsWith('danışan pasif'))).sort((a, b) => (a.status === 'cancelled') - (b.status === 'cancelled'))
   return `<div class="card"><div class="row"><b>${hm(s.starts_at)}–${hm(s.ends_at)}</b><span>${esc(svc(s.service_code).name)}</span><span class="mute">${esc(trn(s.trainer_id))}</span>
-   <span class="grow" style="flex:1"></span><div class="occ ${n >= s.capacity ? 'full' : ''}"><i style="width:${pct}%"></i></div>
-   <span class="tag ${n >= s.capacity ? 'b' : 'g'}">${n}/${s.capacity}${n >= s.capacity ? ' dolu' : ` · ${s.capacity - n} boş`}</span></div>
+   <span class="grow" style="flex:1"></span>${u ? '' : `<div class="occ ${n >= s.capacity ? 'full' : ''}"><i style="width:${pct}%"></i></div>`}
+   ${capTag(s, n)}</div>
    ${people.map(b => `<div class="part ${b.status === 'cancelled' ? 'c' : ''}"><span class="n">${esc(b.rv_client?.full_name)} ${b.kind === 'makeup' ? '<span class="tag">telafi</span>' : ''} ${b.series_id ? '<span class="tag">seri</span>' : ''}</span>
      <span class="tag ${b.status === 'cancelled' ? 'b' : b.status === 'attended' ? 'g' : ''}">${ST[b.status]}</span>${b.att_by_name && ['attended', 'no_show'].includes(b.status) ? `<span class="mute" style="font-size:12px">${esc(b.att_by_name)}${b.att_note ? ' · ' + esc(b.att_note) : ''}</span>` : ''}
      ${b.status !== 'cancelled' ? `<button class="btn s" onclick="mark('${b.id}','attended')">Geldi</button><button class="btn s" onclick="mark('${b.id}','no_show')">Gelmedi</button>
        <button class="btn s" onclick="moveDlg('${b.id}','${s.service_code}',false)">Taşı</button><button class="btn s" onclick="moveDlg('${b.id}','${s.service_code}',true)">Telafi</button>
        <button class="btn s d" onclick="cancelB('${b.id}')">İptal</button>` : ''}</div>`).join('')}
-   <div class="row" style="margin-top:8px">${n < s.capacity ? `<button class="btn s p" onclick="addPerson('${s.id}','${s.service_code}','${s.starts_at}')">+ Danışan ekle</button>` : ''}
+   <div class="row" style="margin-top:8px">${u || n < s.capacity ? `<button class="btn s p" onclick="addPerson('${s.id}','${s.service_code}','${s.starts_at}')">+ Danışan ekle</button>` : ''}
    <button class="btn s" onclick="editSession('${s.id}')">Düzenle</button></div></div>`
 }
 async function mark(id, st, after) {
@@ -311,14 +314,16 @@ async function quickBook(day, time, code) {
     state = { sess: null, full: false }
     if (x.s && x.d && /^\d\d:\d\d$/.test(x.h || '') && x.h >= '06:00' && x.h <= '23:00') {
       const ss = await q(sb.from('rv_session').select('id,trainer_id,capacity,rv_booking(id,client_id,status,rv_client(full_name))').eq('service_code', x.s).eq('status', 'active').eq('starts_at', new Date(iso(x.d, x.h)).toISOString()))
-      const withRoom = ss.find(s => live(s).length < s.capacity), any = ss[0]
-      if (any) {
+      const u = unl(x.s)
+      const withRoom = u ? (ss.find(s => x.t && s.trainer_id === x.t) || (!x.t ? ss[0] : null)) : ss.find(s => live(s).length < s.capacity), any = u ? withRoom : ss[0]
+      if (C && u && ss.some(s => live(s).some(b => b.client_id === C.id))) { ok = false; msg = `<span class="tag b">Bu danışan bu saatte zaten kayıtlı</span>` }
+      else if (any) {
         const sx = withRoom || any, ppl = live(sx), names = ppl.map(b => b.rv_client?.full_name).filter(Boolean)
         if (C && ss.some(s => live(s).some(b => b.client_id === C.id))) { ok = false; msg = `<span class="tag b">Bu danışan bu seansta zaten kayıtlı</span>` }
         else if (!withRoom) { ok = false; state.full = true; msg = `<span class="tag b">Grup dolu (${ppl.length}/${sx.capacity})</span> Başka saat seçin.` }
-        else { state.sess = sx; msg = `<span class="tag g">Mevcut gruba eklenecek</span> ${esc(svc(x.s).name)} · ${esc(trn(sx.trainer_id))} · ${ppl.length}/${sx.capacity}${names.length ? ' — ' + esc(names.join(', ')) : ''}`
+        else { state.sess = sx; msg = `<span class="tag g">${u ? 'Mevcut seansa eklenecek' : 'Mevcut gruba eklenecek'}</span> ${esc(svc(x.s).name)} · ${esc(trn(sx.trainer_id))} · ${u ? `${ppl.length} danışan · kontenjansız` : `${ppl.length}/${sx.capacity}`}${names.length ? ' — ' + esc(names.join(', ')) : ''}`
           if (sx.trainer_id && x.t !== sx.trainer_id) setTrainers(sx.trainer_id) }
-      } else msg = `<span class="tag">Yeni seans açılacak</span> ${esc(svc(x.s).name)} ${esc(x.h)} · ${esc(trn(x.t))} · kapasite ${svc(x.s).capacity}`
+      } else msg = `<span class="tag">Yeni seans açılacak</span> ${esc(svc(x.s).name)} ${esc(x.h)} · ${esc(trn(x.t))} · ${u ? 'kontenjansız' : `kapasite ${svc(x.s).capacity}`}`
     }
     $('qbx').innerHTML = msg
     if (C && x.s && x.d) {
@@ -343,7 +348,7 @@ async function quickBook(day, time, code) {
     try {
       await refresh(); if (state.full) throw new Error('Grup dolu')
       const created = !state.sess
-      const sid = await q(sb.rpc('rv_session_at', { p_service: x.s, p_trainer: state.sess ? null : x.t, p_resource: null, p_starts: st }))
+      const sid = state.sess && unl(x.s) ? state.sess.id : await q(sb.rpc('rv_session_at', { p_service: x.s, p_trainer: state.sess ? null : x.t, p_resource: null, p_starts: st }))
       try { await q(sb.rpc('rv_book', { p_session: sid, p_client: C.id, p_package: pkg })) }
       catch (e) { if (created) await sb.from('rv_session').update({ status: 'cancelled', note: 'hızlı randevu kaydedilemedi' }).eq('id', sid).eq('status', 'active'); throw e }   // yeni açılan boş seans takvimde kalmaz
       toast(`Randevu oluşturuldu: ${C.full_name} · ${svc(x.s).name} · ${x.d.slice(8)}.${x.d.slice(5, 7)} ${x.h}`)
@@ -413,26 +418,60 @@ async function addPerson(sid, code, startsAt) {
     $('aok').onclick = async () => { await run(() => q(sb.rpc('rv_book', { p_session: sid, p_client: c.id, p_package: $('pp').value || null })), 'Eklendi'); closeDlg(); go(S.view, true) }
   })
 }
+// 017: Liste (mevcut seans / önerilen boş saat) + her zaman elle saat seçip "Onayla". Hazır yer yoksa da onay butonu vardır.
 async function moveDlg(bid, code, makeup) {
-  dlg(makeup ? 'Telafi dersi' : 'Randevuyu taşı', `<div class="grid2"><label class="f">Hizmet<select id="ms">${svcOpts(code)}</select></label><label class="f">Tarih<input id="md" type="date" value="${addDays(S.day, 1)}"></label></div><div id="ml" style="margin-top:10px"></div>
-    <p class="mute">${makeup ? 'Eski ders "telafiye taşındı" olarak iptal edilir, telafi dersi aynı paketten düşer.' : 'Eski ders iptal edilir, yeni saate aynı paketle yazılır.'} Yeni yer açılamazsa eski randevu bozulmaz.</p>`, '')
-  const load = async () => {
-    const d = $('md').value, c = $('ms').value
-    const ss = await q(sb.from('rv_session').select('id,starts_at,capacity,trainer_id,rv_booking(id,status)').eq('service_code', c).eq('status', 'active').gte('starts_at', iso(d, '00:00')).lt('starts_at', iso(addDays(d, 1), '00:00')).order('starts_at'))
-    const free = await q(sb.rpc('rv_free_slots', { p_day: d, p_service: c })).catch(() => [])
-    const rows = ss.filter(s => live(s).length < s.capacity).map(s => `<div class="part"><span class="n">${hm(s.starts_at)} · ${esc(trn(s.trainer_id))} <span class="tag g">${s.capacity - live(s).length} boş</span></span><button class="btn s p" data-s="${s.id}">Buraya</button></div>`)
-    const fr = svc(c).is_group ? [] : free.map(f => `<div class="part"><span class="n">${f.o_start.slice(0, 5)} · ${esc(f.o_trainer_name)} <span class="tag">yeni seans</span></span><button class="btn s p" data-t="${f.o_trainer}" data-h="${f.o_start.slice(0, 5)}">Buraya</button></div>`)
-    $('ml').innerHTML = rows.concat(fr).join('') || '<p class="mute">Bu gün uygun yer yok. Gün sekmesinden yeni seans açabilirsiniz.</p>'
-    $('ml').querySelectorAll('button').forEach(b => b.onclick = async () => {
-      await run(async () => {
-        let sid = b.dataset.s
-        if (!sid) sid = (await q(sb.from('rv_session').insert({ service_code: c, trainer_id: b.dataset.t, starts_at: iso(d, b.dataset.h) }).select('id').single())).id
-        await q(sb.rpc('rv_move_booking', { p_booking: bid, p_session: sid, p_makeup: makeup }))
-      }, makeup ? 'Telafi dersi yazıldı' : 'Taşındı')
-      closeDlg(); go(S.view, true)
-    })
+  const old = await q(sb.from('rv_booking').select('rv_session(trainer_id,starts_at)').eq('id', bid).single()).catch(() => null)
+  const oldT = old?.rv_session?.trainer_id || '', oldH = old?.rv_session ? hm(old.rv_session.starts_at) : ''
+  const title = makeup ? 'Telafi dersi' : 'Randevuyu taşı', okMsg = makeup ? 'Telafi dersi yazıldı' : 'Taşındı'
+  dlg(title, `<div class="grid2"><label class="f">Hizmet<select id="ms">${svcOpts(code)}</select></label><label class="f">Tarih<input id="md" type="date" value="${addDays(S.day, 1)}"></label>
+    <label class="f">Saat<input id="mh" type="time" step="300" value="${oldH}"></label><label class="f">Eğitmen / personel<select id="mt"></select></label></div>
+    <div id="mx" style="margin-top:8px"></div>
+    <div id="ml" style="margin-top:10px"></div>
+    <p class="mute">${makeup ? 'Eski ders "telafiye taşındı" olarak iptal edilir, telafi dersi aynı paketten düşer.' : 'Eski ders iptal edilir, yeni saate aynı paketle yazılır.'} Yeni yer açılamazsa eski randevu bozulmaz.</p>`,
+    `<button class="btn" onclick="closeDlg()">Vazgeç</button><button class="btn p" id="mok" disabled>Onayla</button>`)
+  let busy = false, ss = []
+  const setT = () => { const c = $('ms').value, cur = $('mt').value || oldT, list = S.trainers.filter(t => t.active && (!t.services.length || t.services.includes(c)))
+    $('mt').innerHTML = opts(list.map(t => [t.id, t.name]), list.some(t => t.id === cur) ? cur : (list.length === 1 ? list[0].id : ''), 'Eğitmen yok') }
+  // Seçili saat/eğitmen için: mevcut seansa mı eklenecek, yeni seans mı açılacak, dolu mu
+  const target = () => {
+    const c = $('ms').value, h = $('mh').value, t = $('mt').value || null
+    if (!/^\d\d:\d\d$/.test(h || '')) return { ok: false, msg: 'Saat seçin ya da aşağıdaki listeden "Buraya" deyin.' }
+    if (h < '06:00' || h > '23:00') return { ok: false, msg: '<span class="tag b">Geçersiz saat</span>' }
+    const at = ss.filter(s => hm(s.starts_at) === h && (!t || s.trainer_id === t))
+    if (unl(c)) { const s = at[0]; return { ok: true, sid: s?.id, t: s ? s.trainer_id : t, msg: s ? `<span class="tag g">Mevcut seansa eklenecek</span> ${esc(trn(s.trainer_id))} · ${live(s).length} danışan · kontenjansız` : `<span class="tag">Yeni seans açılacak</span> ${esc(trn(t))} · kontenjansız` } }
+    const room = at.find(s => live(s).length < s.capacity)
+    if (room) return { ok: true, sid: room.id, t: room.trainer_id, msg: `<span class="tag g">Mevcut gruba eklenecek</span> ${esc(trn(room.trainer_id))} · ${live(room).length}/${room.capacity}` }
+    if (at.length) return { ok: false, msg: `<span class="tag b">Bu saatteki seans dolu</span> Başka saat seçin.` }
+    return { ok: true, t, msg: `<span class="tag">Yeni seans açılacak</span> ${esc(trn(t))} · kapasite ${svc(c).capacity}` }
   }
-  $('md').onchange = load; $('ms').onchange = load; load()
+  const showT = () => { const x = target(); $('mx').innerHTML = x.msg; $('mok').disabled = !x.ok || busy }
+  async function doMove(sid, t, h) {
+    if (busy) return; busy = true; $('mok').disabled = true
+    const c = $('ms').value, d = $('md').value
+    let created = null
+    try {
+      await run(async () => {
+        if (!sid) { sid = await q(sb.rpc('rv_session_at', { p_service: c, p_trainer: t || null, p_resource: null, p_starts: new Date(iso(d, h)).toISOString() }))
+          if (!ss.some(s => s.id === sid)) created = sid }
+        try { await q(sb.rpc('rv_move_booking', { p_booking: bid, p_session: sid, p_makeup: makeup })) }
+        catch (e) { if (created) await sb.from('rv_session').update({ status: 'cancelled', note: 'taşıma kaydedilemedi' }).eq('id', created).eq('status', 'active'); throw e }   // boş seans takvimde kalmaz
+      }, okMsg)
+      closeDlg(); go(S.view, true)
+    } catch { busy = false; showT() }
+  }
+  const load = async () => {
+    const d = $('md').value, c = $('ms').value, u = unl(c)
+    ss = await q(sb.from('rv_session').select('id,starts_at,capacity,trainer_id,rv_booking(id,status)').eq('service_code', c).eq('status', 'active').gte('starts_at', iso(d, '00:00')).lt('starts_at', iso(addDays(d, 1), '00:00')).order('starts_at'))
+    const free = await q(sb.rpc('rv_free_slots', { p_day: d, p_service: c })).catch(() => [])
+    const rows = ss.filter(s => u || live(s).length < s.capacity).map(s => `<div class="part"><span class="n">${hm(s.starts_at)} · ${esc(trn(s.trainer_id))} <span class="tag g">${u ? `${live(s).length} danışan · kontenjansız` : `${s.capacity - live(s).length} boş`}</span></span><button class="btn s p" data-s="${s.id}">Buraya</button></div>`)
+    const fr = svc(c).is_group ? [] : free.map(f => `<div class="part"><span class="n">${f.o_start.slice(0, 5)} · ${esc(f.o_trainer_name)} <span class="tag">yeni seans</span></span><button class="btn s p" data-t="${f.o_trainer}" data-h="${f.o_start.slice(0, 5)}">Buraya</button></div>`)
+    $('ml').innerHTML = rows.length || fr.length ? `<p class="mute" style="margin:0 0 4px">Hazır yerler:</p>${rows.concat(fr).join('')}` : '<p class="mute">Bu gün hazır seans yok. Yukarıdan saat ve personel seçip <b>Onayla</b>\'ya basın; seans açılır.</p>'
+    $('ml').querySelectorAll('button').forEach(b => b.onclick = () => doMove(b.dataset.s || null, b.dataset.t || null, b.dataset.h || null))
+    showT()
+  }
+  $('mok').onclick = () => { const x = target(); if (x.ok) doMove(x.sid || null, x.t, $('mh').value) }
+  $('md').onchange = load; $('ms').onchange = () => { setT(); load() }; $('mh').oninput = showT; $('mt').onchange = showT
+  setT(); load()
 }
 
 // ------------------------------------------------------------ hafta
@@ -452,8 +491,9 @@ function weekCard(s) {
   const seen = new Set(), ppl = live(s).filter(b => !seen.has(b.client_id) && seen.add(b.client_id)), n = ppl.length
   const names = ppl.map(b => `<li>${esc(b.rv_client?.full_name || '—')} ${ATT[b.status] ? `<span class="tag ${b.status === 'attended' ? 'g' : 'b'}">${ATT[b.status]}</span>` : ''}</li>`).join('')
   const past = new Date(s.starts_at) < new Date(), open = past && ppl.some(b => b.status === 'booked')
-  return `<div class="s ${n >= s.capacity ? 'full' : n ? 'part' : ''}" title="Bu seansa danışan ekle" onclick="quickBook('${ymd(new Date(s.starts_at))}','${hm(s.starts_at)}','${s.service_code}')"><b>${hm(s.starts_at)}</b> ${esc(svc(s.service_code).name)}<br>
-    <span class="mute">${esc(trn(s.trainer_id))} · ${n} danışan · ${n}/${s.capacity}${n >= s.capacity ? ' dolu' : ''}${open ? ' · <b>yoklama bekliyor</b>' : ''}</span>
+  const u = unl(s.service_code)
+  return `<div class="s ${!u && n >= s.capacity ? 'full' : n ? 'part' : ''}" title="Bu seansa danışan ekle" onclick="quickBook('${ymd(new Date(s.starts_at))}','${hm(s.starts_at)}','${s.service_code}')"><b>${hm(s.starts_at)}</b> ${esc(svc(s.service_code).name)}<br>
+    <span class="mute">${esc(trn(s.trainer_id))} · ${n} danışan${u ? ' · kontenjansız' : ` · ${n}/${s.capacity}${n >= s.capacity ? ' dolu' : ''}`}${open ? ' · <b>yoklama bekliyor</b>' : ''}</span>
     ${n ? (n > 5 ? `<details onclick="event.stopPropagation()"><summary>${n} isim</summary><ol class="wk">${names}</ol></details>` : `<ol class="wk">${names}</ol>`) : ''}</div>`
 }
 async function copyWeek(m0) {
@@ -573,6 +613,11 @@ async function clientForm(c) {
   $('fok').onclick = async () => {
     const row = { full_name: $('fn').value.trim(), phone: phoneNorm($('fp').value) }
     if (c) row.active = $('fa').value === 'true'
+    if (c?.active && !row.active && !$('fok').dataset.ok) {   // 017: pasif = ileri seanslar kapanır
+      const n = (await q(sb.from('rv_booking').select('id,rv_session!inner(starts_at)').eq('client_id', c.id).eq('status', 'booked').gt('rv_session.starts_at', new Date().toISOString())).catch(() => [])).length
+      $('fw').innerHTML = `<span class="warn"><b>Pasif yapılınca:</b> ileri tarihli ${n} randevusu iptal edilir (hak düşmez), haftalık serileri kapanır, yeri kontenjandan düşer. Geçmiş kayıtlar ve paketler kalır. Tekrar aktif yapılırsa seriler yeniden açılmalıdır.</span>`
+      $('fok').dataset.ok = 1; $('fok').textContent = 'Onayla: pasif yap'; return
+    }
     const r = await run(() => c ? q(sb.from('rv_client').update(row).eq('id', c.id).select('id').single()) : q(sb.from('rv_client').insert(row).select('id').single()), 'Kaydedildi')
     clientDetail(r.id)
   }
@@ -893,8 +938,10 @@ async function serviceForm(code) {
   dlg(s.name, `<div class="grid2"><label class="f">Ad<input id="vn" value="${esc(s.name)}"></label><label class="f">Ders süresi (dk)<input id="vd" type="number" value="${s.duration_min}"></label>
     <label class="f">Geçiş süresi (dk)<input id="vb" type="number" value="${s.buffer_min}"></label><label class="f">Kapasite<input id="vc" type="number" value="${s.capacity}"></label>
     <label class="f">Kullandığı cihaz<input id="vu" type="number" min="1" value="${s.units_needed}"></label><label class="f">Teyit<select id="vv">${opts([['true', 'Teyitli'], ['false', 'Teyit bekliyor']], String(s.verified))}</select></label>
-    <label class="f">Durum<select id="va">${opts([['true', 'Aktif'], ['false', 'Pasif']], String(s.active))}</select></label></div>`, `<button class="btn p" id="vok">Kaydet</button>`)
-  $('vok').onclick = async () => { await run(() => q(sb.from('rv_service').update({ name: $('vn').value, duration_min: +$('vd').value, buffer_min: +$('vb').value, capacity: +$('vc').value, units_needed: +$('vu').value, verified: $('vv').value === 'true', active: $('va').value === 'true' }).eq('code', code)), 'Kaydedildi'); closeDlg(); go('ayar') }
+    <label class="f">Durum<select id="va">${opts([['true', 'Aktif'], ['false', 'Pasif']], String(s.active))}</select></label>
+    <label class="f">Kontenjan<select id="vl">${opts([['false', 'Kontenjanlı'], ['true', 'Kontenjansız (aynı saate çok danışan / seans)']], String(!!s.unlimited))}</select></label></div>
+    <p class="mute">Kontenjansız: diyet ve bölgesel incelme gibi; yeni açılan seanslarda geçerli olur.</p>`, `<button class="btn p" id="vok">Kaydet</button>`)
+  $('vok').onclick = async () => { await run(() => q(sb.from('rv_service').update({ name: $('vn').value, duration_min: +$('vd').value, buffer_min: +$('vb').value, capacity: +$('vc').value, units_needed: +$('vu').value, verified: $('vv').value === 'true', active: $('va').value === 'true', unlimited: $('vl').value === 'true' }).eq('code', code)), 'Kaydedildi'); closeDlg(); go('ayar') }
 }
 
 // ------------------------------------------------------------ geçmiş

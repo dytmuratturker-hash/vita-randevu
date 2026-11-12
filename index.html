@@ -261,8 +261,9 @@ function sessCard(s) {
    ${people.map(b => `<div class="part ${b.status === 'cancelled' ? 'c' : ''}"><span class="n">${esc(b.rv_client?.full_name)} ${b.kind === 'makeup' ? '<span class="tag">telafi</span>' : ''} ${b.series_id ? '<span class="tag">seri</span>' : ''}</span>
      <span class="tag ${b.status === 'cancelled' ? 'b' : b.status === 'attended' ? 'g' : ''}">${ST[b.status]}</span>${b.att_by_name && ['attended', 'no_show'].includes(b.status) ? `<span class="mute" style="font-size:12px">${esc(b.att_by_name)}${b.att_note ? ' · ' + esc(b.att_note) : ''}</span>` : ''}
      ${b.status !== 'cancelled' ? `<button class="btn s" onclick="mark('${b.id}','attended')">Geldi</button><button class="btn s" onclick="mark('${b.id}','no_show')">Gelmedi</button>
-       <button class="btn s" onclick="moveDlg('${b.id}','${s.service_code}',false)">Taşı</button><button class="btn s" onclick="moveDlg('${b.id}','${s.service_code}',true)">Telafi</button>
-       <button class="btn s d" onclick="cancelB('${b.id}')">İptal</button>` : ''}</div>`).join('')}
+       ${b.status === 'booked' ? `<button class="btn s" onclick="moveDlg('${b.id}','${s.service_code}',false)">Taşı</button>` : ''}${b.status !== 'attended' ? `<button class="btn s" onclick="moveDlg('${b.id}','${s.service_code}',true)">Telafi</button>` : ''}
+       ${b.status === 'booked' ? `<button class="btn s d" onclick="cancelB('${b.id}')">İptal</button>` : ''}`
+     : !/^(telafiye|başka saate)/.test(b.cancel_reason || '') ? `<button class="btn s" title="Önceden iptal edilen bu ders için telafi yaz (kendi saatinde ya da başka saatte)" onclick="moveDlg('${b.id}','${s.service_code}',true)">Telafi yaz</button>` : ''}</div>`).join('')}
    <div class="row" style="margin-top:8px">${u || n < s.capacity ? `<button class="btn s p" onclick="addPerson('${s.id}','${s.service_code}','${s.starts_at}')">+ Danışan ekle</button>` : ''}
    <button class="btn s" onclick="editSession('${s.id}')">Düzenle</button></div></div>`
 }
@@ -420,14 +421,18 @@ async function addPerson(sid, code, startsAt) {
 }
 // 017: Liste (mevcut seans / önerilen boş saat) + her zaman elle saat seçip "Onayla". Hazır yer yoksa da onay butonu vardır.
 async function moveDlg(bid, code, makeup) {
-  const old = await q(sb.from('rv_booking').select('rv_session(trainer_id,starts_at)').eq('id', bid).single()).catch(() => null)
-  const oldT = old?.rv_session?.trainer_id || '', oldH = old?.rv_session ? hm(old.rv_session.starts_at) : ''
+  const old = await q(sb.from('rv_booking').select('client_id,session_id,status,rv_session(trainer_id,starts_at)').eq('id', bid).single()).catch(() => null)
+  const oldT = old?.rv_session?.trainer_id || '', oldH = old?.rv_session ? hm(old.rv_session.starts_at) : '', cid = old?.client_id
   const title = makeup ? 'Telafi dersi' : 'Randevuyu taşı', okMsg = makeup ? 'Telafi dersi yazıldı' : 'Taşındı'
+  const note = !makeup ? 'Eski ders iptal edilir, yeni saate aynı paketle yazılır.'
+    : old?.status === 'cancelled' ? 'Önceden iptal edilen ders için telafi yazılır (danışanın kendi saatinde de olabilir); aynı paketten 1 hak kullanır.'
+    : old?.status === 'no_show' ? '"Gelmedi" kaydı kalır (hakkı düşmüştür); telafi dersi pakette 1 hak daha kullanır.'
+    : 'Eski ders "telafiye taşındı" olarak iptal edilir, telafi dersi aynı paketten düşer (net hak değişmez).'
   dlg(title, `<div class="grid2"><label class="f">Hizmet<select id="ms">${svcOpts(code)}</select></label><label class="f">Tarih<input id="md" type="date" value="${addDays(S.day, 1)}"></label>
     <label class="f">Saat<input id="mh" type="time" step="300" value="${oldH}"></label><label class="f">Eğitmen / personel<select id="mt"></select></label></div>
     <div id="mx" style="margin-top:8px"></div>
     <div id="ml" style="margin-top:10px"></div>
-    <p class="mute">${makeup ? 'Eski ders "telafiye taşındı" olarak iptal edilir, telafi dersi aynı paketten düşer.' : 'Eski ders iptal edilir, yeni saate aynı paketle yazılır.'} Yeni yer açılamazsa eski randevu bozulmaz.</p>`,
+    <p class="mute">${note} Ayda 1 telafi; kapasite ve paket hakkı denetlenir. Yeni yer açılamazsa eski randevu bozulmaz.</p>`,
     `<button class="btn" onclick="closeDlg()">Vazgeç</button><button class="btn p" id="mok" disabled>Onayla</button>`)
   let busy = false, ss = []
   const setT = () => { const c = $('ms').value, cur = $('mt').value || oldT, list = S.trainers.filter(t => t.active && (!t.services.length || t.services.includes(c)))
@@ -438,6 +443,8 @@ async function moveDlg(bid, code, makeup) {
     if (!/^\d\d:\d\d$/.test(h || '')) return { ok: false, msg: 'Saat seçin ya da aşağıdaki listeden "Buraya" deyin.' }
     if (h < '06:00' || h > '23:00') return { ok: false, msg: '<span class="tag b">Geçersiz saat</span>' }
     const at = ss.filter(s => hm(s.starts_at) === h && (!t || s.trainer_id === t))
+    const mine = ss.filter(s => hm(s.starts_at) === h).find(s => live(s).some(b => b.client_id === cid))
+    if (mine) return { ok: false, msg: `<span class="tag b">Danışan bu saatteki derste zaten kayıtlı</span> ${mine.id === old?.session_id ? 'Bu, taşınan dersin kendisi.' : 'Çift kayıt ve çift hak düşümü yapılmaz.'}` }
     if (unl(c)) { const s = at[0]; return { ok: true, sid: s?.id, t: s ? s.trainer_id : t, msg: s ? `<span class="tag g">Mevcut seansa eklenecek</span> ${esc(trn(s.trainer_id))} · ${live(s).length} danışan · kontenjansız` : `<span class="tag">Yeni seans açılacak</span> ${esc(trn(t))} · kontenjansız` } }
     const room = at.find(s => live(s).length < s.capacity)
     if (room) return { ok: true, sid: room.id, t: room.trainer_id, msg: `<span class="tag g">Mevcut gruba eklenecek</span> ${esc(trn(room.trainer_id))} · ${live(room).length}/${room.capacity}` }
@@ -461,9 +468,9 @@ async function moveDlg(bid, code, makeup) {
   }
   const load = async () => {
     const d = $('md').value, c = $('ms').value, u = unl(c)
-    ss = await q(sb.from('rv_session').select('id,starts_at,capacity,trainer_id,rv_booking(id,status)').eq('service_code', c).eq('status', 'active').gte('starts_at', iso(d, '00:00')).lt('starts_at', iso(addDays(d, 1), '00:00')).order('starts_at'))
+    ss = await q(sb.from('rv_session').select('id,starts_at,capacity,trainer_id,rv_booking(id,status,client_id)').eq('service_code', c).eq('status', 'active').gte('starts_at', iso(d, '00:00')).lt('starts_at', iso(addDays(d, 1), '00:00')).order('starts_at'))
     const free = await q(sb.rpc('rv_free_slots', { p_day: d, p_service: c })).catch(() => [])
-    const rows = ss.filter(s => u || live(s).length < s.capacity).map(s => `<div class="part"><span class="n">${hm(s.starts_at)} · ${esc(trn(s.trainer_id))} <span class="tag g">${u ? `${live(s).length} danışan · kontenjansız` : `${s.capacity - live(s).length} boş`}</span></span><button class="btn s p" data-s="${s.id}">Buraya</button></div>`)
+    const rows = ss.filter(s => (u || live(s).length < s.capacity) && !live(s).some(b => b.client_id === cid)).map(s => `<div class="part"><span class="n">${hm(s.starts_at)} · ${esc(trn(s.trainer_id))} <span class="tag g">${u ? `${live(s).length} danışan · kontenjansız` : `${s.capacity - live(s).length} boş`}</span></span><button class="btn s p" data-s="${s.id}">Buraya</button></div>`)
     const fr = svc(c).is_group ? [] : free.map(f => `<div class="part"><span class="n">${f.o_start.slice(0, 5)} · ${esc(f.o_trainer_name)} <span class="tag">yeni seans</span></span><button class="btn s p" data-t="${f.o_trainer}" data-h="${f.o_start.slice(0, 5)}">Buraya</button></div>`)
     $('ml').innerHTML = rows.length || fr.length ? `<p class="mute" style="margin:0 0 4px">Hazır yerler:</p>${rows.concat(fr).join('')}` : '<p class="mute">Bu gün hazır seans yok. Yukarıdan saat ve personel seçip <b>Onayla</b>\'ya basın; seans açılır.</p>'
     $('ml').querySelectorAll('button').forEach(b => b.onclick = () => doMove(b.dataset.s || null, b.dataset.t || null, b.dataset.h || null))
@@ -637,7 +644,7 @@ async function clientDetail(id) {
     const miss = p.weekly_days.filter(d => !ser.some(s => s.weekday === d && p.services.includes(s.service_code)) && !p.services.some(c => upDays.has(d + ':' + c)))
     return miss.length ? `<div class="tag w" style="display:block;margin:6px 0">Programda ${esc(p.weekly_days.map(d => DAYS[d - 1]).join(', '))} var; takvimde ${esc(miss.map(d => DAYS[d - 1]).join(', '))} randevusu yok. Doğruysa "Haftalık seri oluştur" ile ekleyin.</div>` : ''
   }
-  dlg(c.full_name, `<p class="mute">${esc(c.phone || 'telefon yok')} ${c.source === 'clinyo' ? '· Clinyo' : ''} ${c.active ? '' : '· <span class="tag b">pasif</span>'} <button class="btn s" id="ced">Düzenle</button></p>
+  dlg(c.full_name, `<p class="mute">${esc(c.phone || 'telefon yok')} ${c.source === 'clinyo' ? '· Clinyo' : ''} ${c.active ? '' : '· <span class="tag b">pasif</span>' + (c.deactivated_at ? ` <span class="mute">${esc(c.deactivated_by_name || 'bilinmiyor')} · ${new Date(c.deactivated_at).toLocaleString('tr-TR', { timeZone: TZ })}</span>` : '')} <button class="btn s" id="ced">Düzenle</button></p>
     <h4>Paketler <button class="btn s p" id="cpk">+ Paket / hizmet</button></h4>
     ${pk.map(p => { const rem = p.total_sessions - p.used - p.reserved; return `<div class="card"><div class="row"><b>${esc(p.package_type)}</b><span class="tag">${esc(KIND[p.kind])}</span>${p.active ? '' : '<span class="tag b">pasif</span>'}<span class="grow" style="flex:1"></span><button class="btn s" data-pk="${p.id}">Düzenle</button></div>
       <div class="mute">${esc(p.services.map(x => svc(x).name).join(', '))} · ${esc(trn(p.trainer_id))} · ${p.starts_on} → ${p.ends_on || 'süresiz'}</div>

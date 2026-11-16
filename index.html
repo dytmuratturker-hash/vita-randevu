@@ -133,11 +133,14 @@ async function boot() {
   const st = await sb.from('rv_staff').select('role,display_name,active').eq('user_id', S.me.id).maybeSingle()
   if (st.data && st.data.active && st.data.role === 'trainer') {   // 011: eğitmen yalnız kendi seanslarını görür (veritabanı fonksiyonu üzerinden)
     S.role = 'trainer'; S.name = st.data.display_name; S.view = 'tbugun'; trainerShell(); go(S.view)
-    if (!S.timer) S.timer = setInterval(() => { if (!document.hidden && !$('dlg').open) go(S.view, true) }, 60000)
+    if (!S.timer) S.timer = setInterval(() => { if (S.role === 'trainer' && !document.hidden && !$('dlg').open) go(S.view, true) }, 60000)
     return
   }
   if (!st.data || !st.data.active || !['staff', 'admin'].includes(st.data.role)) {
-    $('app').innerHTML = `<div class="login"><div class="card"><h3>Yetki bekleniyor</h3><p class="mute">Bu hesap (${esc(S.me.email)}) randevu paneline henüz yetkilendirilmedi. İşletme sahibinden yetki isteyin.</p><button class="btn" onclick="logout()">Çıkış</button></div></div>`
+    S.role = null      // 021: hesap yönetici tarafından pasif yapıldıysa yenileme zamanlayıcısı da durur
+    $('app').innerHTML = st.data && !st.data.active
+      ? `<div class="login"><div class="card"><h3>Hesap kapalı</h3><p class="mute">Bu hesabın randevu paneli erişimi işletme sahibi tarafından kapatıldı. Bir yanlışlık olduğunu düşünüyorsanız işletme sahibiyle görüşün.</p><button class="btn" onclick="logout()">Çıkış</button></div></div>`
+      : `<div class="login"><div class="card"><h3>Yetki bekleniyor</h3><p class="mute">Bu hesap (${esc(S.me.email)}) randevu paneline henüz yetkilendirilmedi. İşletme sahibinden yetki isteyin.</p><button class="btn" onclick="logout()">Çıkış</button></div></div>`
     return
   }
   S.role = st.data.role; S.name = st.data.display_name
@@ -222,7 +225,9 @@ function go(v, quiet) {
   S.view = v
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.v === v))
   if (!quiet) $('m').innerHTML = '<p class="mute">Yükleniyor…</p>'
-  if (S.role === 'trainer') return ({ tbugun: () => trainerView(0), thafta: () => trainerView(1) }[v] || (() => trainerView(0)))().catch(e => { $('m').innerHTML = `<div class="card">${esc(errText(e))}</div>` })
+  if (S.role === 'trainer') return ({ tbugun: () => trainerView(0), thafta: () => trainerView(1) }[v] || (() => trainerView(0)))().catch(e => {
+    if (/RV_FORBIDDEN/.test(String(e?.message))) return boot()     // 021: hesap pasif yapıldıysa açık oturum da "Hesap kapalı" ekranına düşer
+    $('m').innerHTML = `<div class="card">${esc(errText(e))}</div>` })
   talepCount(); pkgCount()
   return ({ yoklama: attendanceView, talep: talepView, gun: dayView, hafta: weekView, bos: freeView, danisan: clientsView, paket: packageAlertsView, ayar: settingsView, gecmis: historyView }[v])().catch(e => { $('m').innerHTML = `<div class="card">${esc(errText(e))}</div>` })
 }
@@ -751,7 +756,8 @@ async function makeSeries(c, p, ser = []) {
 // ------------------------------------------------------------ eğitmen paneli (011)
 // Eğitmen tabloları doğrudan okuyamaz; yalnız rv_trainer_sessions (kendi seansları, ad soyad) ve rv_trainer_mark (Geldi/Gelmedi) çağrılır.
 function trainerShell() {
-  $('app').innerHTML = `<header><b>VITA Randevu</b><span class="who">${esc(S.name)} · Eğitmen</span><button onclick="changePassword()">Şifre</button><button onclick="logout()">Çıkış</button></header>
+  // 021: eğitmen şifresini işletme sahibi yönetir; eğitmen ekranında "Şifre" düğmesi yok
+  $('app').innerHTML = `<header><b>VITA Randevu</b><span class="who">${esc(S.name)} · Eğitmen</span><button onclick="logout()">Çıkış</button></header>
   <nav><button data-v="tbugun" onclick="go('tbugun')">Bugün</button><button data-v="thafta" onclick="go('thafta')">Bu hafta</button></nav><main id="m"></main>`
 }
 async function trainerView(week) {
@@ -865,16 +871,38 @@ async function packageAlertsView() {
   $('m').innerHTML = `<div class="card"><h3 style="margin-top:0">Paket uyarıları</h3><p class="mute">Kalan haklar silinmez. Süre uzatma ve hak ekleme yalnız yöneticide. Telafi ayda 1. Aynı gün iptalde hak düşer.</p>
     ${g.map(([h, list, why]) => `<h4>${h} (${list.length})</h4>${list.length ? `<table class="list-click"><tr><th>Danışan</th><th>Paket</th><th>Tarih</th><th>Kullanım</th><th></th></tr>${list.map(p => row(p, why(p))).join('')}</table>` : '<p class="mute">Yok.</p>'}`).join('')}</div>`
 }
+// 021: Personel hesapları — liste (ad, giriş kimliği, yetki, bağlı eğitmen, durum, son giriş, son yoklama işareti) + Aktif/Pasif.
+// Pasif yapılan hesap ANINDA hiçbir şey göremez (veritabanı rv_role() aktif şartı); açık oturumu da etkisiz kalır.
+const ROLE_TR = { admin: 'Yönetici', ai: 'WhatsApp AI (yalnız müsaitlik)', trainer: 'Eğitmen (yalnız kendi seansları)', staff: 'Personel' }
 async function staffAccounts() {
-  const st = await q(sb.rpc('rv_staff_accounts'))
-  $('stf').innerHTML = `<table><tr><th>Ad</th><th>E-posta</th><th>Yetki</th><th>Şifre</th><th>Son giriş</th><th></th></tr>${st.map(x => `<tr><td>${esc(x.display_name)}</td><td class="mute">${esc(x.email)}</td>
-    <td>${x.role === 'admin' ? 'Yönetici' : x.role === 'ai' ? 'WhatsApp AI (yalnız müsaitlik)' : x.role === 'trainer' ? 'Eğitmen (yalnız kendi seansları)' : 'Personel'} ${x.active ? '' : '<span class="tag b">pasif</span>'}</td>
-    <td>${x.has_password ? '<span class="tag g">belirlendi</span>' : '<span class="tag w">yok</span>'}</td><td class="mute">${x.last_sign_in_at ? new Date(x.last_sign_in_at).toLocaleString('tr-TR', { timeZone: TZ }) : '—'}</td>
-    <td>${['staff', 'trainer'].includes(x.role) ? `<button class="btn s p" data-pw="${x.user_id}" data-n="${esc(x.display_name)}">Şifre belirle</button>` : ''}</td></tr>`).join('')}</table>
-    <p class="mute">Personelin şifresini buradan siz belirlersiniz; e-posta gerekmez. Şifreyi kişiye kendiniz iletin, kişi girdikten sonra üstteki "Şifre" düğmesiyle değiştirebilir.</p>`
+  let st, full = true
+  try { st = await q(sb.rpc('rv_staff_overview')) } catch (e) { full = false; st = await q(sb.rpc('rv_staff_accounts')) }   // 021 uygulanmadan önce eski liste
+  const dt = v => v ? new Date(v).toLocaleString('tr-TR', { timeZone: TZ, day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'
+  const canToggle = x => full && ['staff', 'trainer'].includes(x.role) && x.user_id !== S.me.id
+  $('stf').innerHTML = `<div style="overflow-x:auto"><table><tr><th>Ad</th><th>Giriş kimliği (e-posta)</th><th>Yetki</th>${full ? '<th>Bağlı eğitmen</th>' : ''}<th>Durum</th><th>Son giriş</th>${full ? '<th>Son yoklama işareti</th>' : ''}<th></th></tr>${st.map(x => `<tr${x.active ? '' : ' style="opacity:.65"'}>
+    <td><b>${esc(x.display_name)}</b></td><td class="mute">${esc(x.email)}</td><td>${ROLE_TR[x.role] || esc(x.role)}</td>
+    ${full ? `<td class="mute">${esc(x.trainer_name || '—')}</td>` : ''}
+    <td>${x.active ? '<span class="tag g">Aktif</span>' : '<span class="tag b">Pasif</span>'}${canToggle(x) ? ` <button class="btn s ${x.active ? 'd' : 'p'}" data-act="${x.user_id}" data-on="${x.active ? 0 : 1}" data-n="${esc(x.display_name)}">${x.active ? 'Pasif yap' : 'Aktif yap'}</button>` : ''}</td>
+    <td class="mute">${dt(x.last_sign_in_at)}</td>
+    ${full ? `<td class="mute">${x.role === 'trainer' || x.last_mark_at ? `${dt(x.last_mark_at)}${x.marks_30d ? ` · 30 günde ${x.marks_30d}` : ''}` : ''}</td>` : ''}
+    <td>${['staff', 'trainer'].includes(x.role) ? `<button class="btn s" data-pw="${x.user_id}" data-n="${esc(x.display_name)}">Şifre belirle</button>` : ''}</td></tr>`).join('')}</table></div>
+    <div class="card" style="background:var(--chip);margin-top:10px"><b>Erişimi kapatma ve şifre</b>
+    <ul class="mute" style="margin:6px 0 0;padding-left:18px">
+      <li><b>Pasif yap</b>: kişi o anda paneldeki hiçbir bilgiyi göremez ve işaretleme yapamaz (açık telefon oturumu dahil). Girilmiş yoklamalar silinmez. <b>Aktif yap</b> ile geri açılır.</li>
+      <li><b>Şifre değiştirme</b>: bu tablodaki "Şifre belirle" düğmesi (yalnız yönetici; anında geçerli, eski şifre o anda geçersiz olur). Supabase Dashboard'daki "şifre sıfırlama e-postası" bu hesaplarda çalışmaz.</li>
+      <li>Eğitmen hesapları kurgusal adreslerle açıldı (…@vita-personel.test): bu adreslere <b>e-posta gitmez</b>, "Şifremi unuttum" işe yaramaz. Şifreyi kişiye kendiniz iletin.</li>
+      <li>Eğitmenler yalnız kendi seanslarını (danışan adı) ve Geldi/Gelmedi düğmelerini görür; telefon, paket, fiyat ve diğer eğitmenler görünmez. Kendi şifresini değiştiremez.</li></ul></div>`
   $('stf').querySelectorAll('[data-pw]').forEach(b => b.onclick = () => staffPasswordDlg(b.dataset.pw, b.dataset.n))
-  $('stf').insertAdjacentHTML('beforeend', `<h4>Eğitmen hesabı bağla</h4><p class="mute">Önce Supabase → Authentication'da eğitmenin kendi doğrulanmış e-postasıyla kullanıcı açın (e-posta uydurmayın). Sonra burada eğitmen kaydına bağlayın ve şifresini belirleyin. Eğitmen yalnız kendi seanslarını ve Geldi/Gelmedi'yi görür.</p>
-    <div class="grid2"><label class="f">E-posta<input id="tle" type="email"></label><label class="f">Eğitmen<select id="tlt">${opts(S.trainers.filter(t => t.active && t.services.some(c => /^(PT|REF)/.test(c))).map(t => [t.id, t.name]))}</select></label><label class="f">Görünen ad<input id="tln" placeholder="ör. Koray"></label></div><button class="btn p" id="tlo" style="margin-top:6px">Bağla</button>`)
+  $('stf').querySelectorAll('[data-act]').forEach(b => b.onclick = () => {
+    const on = b.dataset.on === '1', name = b.dataset.n
+    dlg(on ? `Erişimi aç: ${name}` : `Erişimi kapat: ${name}`, on
+      ? `<p>${esc(name)} yeniden panele girebilecek ve yetkisi kadarını görecek.</p>`
+      : `<p><b>${esc(name)}</b> şu andan itibaren panelde hiçbir bilgiyi göremez ve işaretleme yapamaz (açık oturumu da kapanır).</p><p class="mute">Girilmiş yoklamalar ve geçmiş silinmez. İstediğiniz zaman "Aktif yap" ile geri açabilirsiniz.</p>`,
+      `<button class="btn" onclick="closeDlg()">Vazgeç</button><button class="btn ${on ? 'p' : 'd'}" id="acto">${on ? 'Evet, aktif yap' : 'Evet, pasif yap'}</button>`)
+    $('acto').onclick = async () => { await run(() => q(sb.rpc('rv_staff_set_active', { p_user: b.dataset.act, p_active: on })), on ? `${name} aktif` : `${name} pasif yapıldı`); closeDlg(); staffAccounts() }
+  })
+  $('stf').insertAdjacentHTML('beforeend', `<details style="margin-top:10px"><summary>Eğitmen hesabı bağla (yeni eğitmen için)</summary><p class="mute">Önce Supabase Dashboard → Authentication → Add user → Create new user ile kullanıcıyı açın ("Auto Confirm User" işaretli). Sonra burada eğitmen kaydına bağlayın. Koray ve Nagihan hesapları kurulumda bağlanır, burada tekrar bağlamaya gerek yok.</p>
+    <div class="grid2"><label class="f">E-posta<input id="tle" type="email"></label><label class="f">Eğitmen<select id="tlt">${opts(S.trainers.filter(t => t.active && t.services.some(c => /^(PT|REF)/.test(c))).map(t => [t.id, t.name]))}</select></label><label class="f">Görünen ad<input id="tln" placeholder="ör. Koray"></label></div><button class="btn p" id="tlo" style="margin-top:6px">Bağla</button></details>`)
   $('tlo').onclick = async () => { if (!$('tle').value.trim() || !$('tln').value.trim()) return toast('E-posta ve ad gerekli.', true); await run(() => q(sb.rpc('rv_link_trainer', { p_email: $('tle').value, p_trainer: $('tlt').value, p_name: $('tln').value })), 'Eğitmen hesabı bağlandı'); staffAccounts() }
 }
 function staffPasswordDlg(uid, name) {

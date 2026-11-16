@@ -643,6 +643,9 @@ async function clientDetail(id) {
   const up = await q(sb.from('rv_booking').select('id,status,kind,rv_session!inner(starts_at,service_code,trainer_id)').eq('client_id', id).neq('status', 'cancelled').gte('rv_session.starts_at', new Date().toISOString()).limit(500))
   up.sort((a, b) => a.rv_session.starts_at.localeCompare(b.rv_session.starts_at))
   const notes = await sb.from('rv_client_note').select('*').eq('client_id', id).order('created_at', { ascending: false })
+  // 022: paket satış tutarı (yalnız personel/yönetici görür; tablo yoksa alan gizlenir)
+  const sl = pk.length ? await sb.from('rv_package_sale').select('package_id,amount_try,paid_on,entered_by_name').in('package_id', pk.map(p => p.id)) : { data: [] }
+  const saleOn = !sl.error, sm = Object.fromEntries((sl.data || []).map(s => [s.package_id, s]))
   // Paket programı ile takvim karşılaştırması: hangi günlerde serisi/randevusu var, hangi günler eksik (yalnız uyarı; otomatik randevu açılmaz)
   const upDays = new Set(up.map(b => (new Date(b.rv_session.starts_at).getUTCDay() + 6) % 7 + 1 + ':' + b.rv_session.service_code))
   const progCheck = p => {
@@ -656,14 +659,16 @@ async function clientDetail(id) {
       <div class="mute">${esc(p.services.map(x => svc(x).name).join(', '))} · ${esc(trn(p.trainer_id))} · ${p.starts_on} → ${p.ends_on || 'süresiz'}</div>
       <div class="mute">Gün/saat: ${esc((p.weekly_days || []).map(d => DAYS[d - 1]).join(', ') || '—')} ${esc((p.weekly_times || []).map(t => t.slice(0, 5)).join(', '))}</div>
       <div>Toplam <b>${p.total_sessions}</b> · Kullanılan <b>${p.used}</b> · Planlı <b>${p.reserved}</b> · Kalan <b class="${rem <= 1 ? '' : ''}">${rem}</b> ${rem <= 1 && p.active ? '<span class="tag w">bitiyor</span>' : ''}</div>
+      ${saleOn ? saleLine(p, sm[p.id]) : ''}
       ${progCheck(p)}${p.active ? `<button class="btn s" data-ser="${p.id}">Haftalık seri oluştur</button>` : ''}</div>` }).join('') || '<p class="mute">Paket yok.</p>'}
     <h4>Haftalık seriler</h4>${ser.map(s => `<div class="part"><span class="n">${DAYS[s.weekday - 1]} ${s.start_time.slice(0, 5)} · ${esc(svc(s.service_code).name)} · ${esc(trn(s.trainer_id))}</span><button class="btn s d" data-end="${s.id}">Seriyi bitir</button></div>`).join('') || '<p class="mute">Seri yok.</p>'}
     <h4>Yaklaşan randevular</h4>${up.map(b => `<div class="part"><span class="n">${esc(dayLabel(ymd(new Date(b.rv_session.starts_at))))} ${hm(b.rv_session.starts_at)} · ${esc(svc(b.rv_session.service_code).name)} ${b.kind === 'makeup' ? '<span class="tag">telafi</span>' : ''}</span><button class="btn s" data-mv="${b.id}" data-c="${b.rv_session.service_code}">Taşı</button><button class="btn s d" data-cx="${b.id}">İptal</button></div>`).join('') || '<p class="mute">Yaklaşan randevu yok.</p>'}
     <h4>Sekreter notları</h4>${noteBlock(notes)}`, '')
   bindNotes(id, notes)
   $('ced').onclick = () => clientForm(c)
-  $('cpk').onclick = () => packageForm(c)
-  $('dlgB').querySelectorAll('[data-pk]').forEach(b => b.onclick = () => packageForm(c, pk.find(p => p.id === b.dataset.pk)))
+  $('cpk').onclick = () => packageForm(c, null, null, saleOn)
+  $('dlgB').querySelectorAll('[data-pk]').forEach(b => b.onclick = () => packageForm(c, pk.find(p => p.id === b.dataset.pk), sm[b.dataset.pk], saleOn))
+  $('dlgB').querySelectorAll('[data-sale]').forEach(b => b.onclick = () => saleDlg(c, pk.find(p => p.id === b.dataset.sale), sm[b.dataset.sale]))
   $('dlgB').querySelectorAll('[data-ser]').forEach(b => b.onclick = () => makeSeries(c, pk.find(p => p.id === b.dataset.ser), ser))
   $('dlgB').querySelectorAll('[data-end]').forEach(b => b.onclick = async () => { const n = await run(() => q(sb.rpc('rv_end_series', { p_series: b.dataset.end, p_from: today() })), 'Seri bitirildi'); clientDetail(id) })
   $('dlgB').querySelectorAll('[data-cx]').forEach(b => b.onclick = async () => { await run(() => q(sb.rpc('rv_cancel_booking', { p_booking: b.dataset.cx, p_reason: 'iptal' })), 'İptal edildi'); clientDetail(id) })
@@ -697,7 +702,42 @@ function bindNotes(cid, res) {
     save.onclick = async () => { const t = ta.value.trim(); if (!t) return toast('Not boş.', true); if (!healthOk(t)) return; await run(() => q(sb.from('rv_client_note').update({ body: t }).eq('id', n.id)), 'Not güncellendi'); clientDetail(cid) }
   })
 }
-async function packageForm(c, p) {
+// ------------------------------------------------------------ paket satış tutarı (022)
+// Paketin TOPLAM satış tutarı (WhatsApp kaporası dahil). Yalnız personel/yönetici; her değişiklik geçmişe (rv_audit) yazılır.
+// Reklam raporu geliri = max(WhatsApp'ta doğrulanmış ödeme, bu tutar) → kapora iki kez sayılmaz.
+const TL = n => Number(n).toLocaleString('tr-TR', { minimumFractionDigits: 0, maximumFractionDigits: 2 }) + ' TL'
+const trDate = d => d ? d.split('-').reverse().join('.') : ''
+function saleLine(p, s) {
+  return s ? `<div class="row" style="gap:6px;margin:4px 0">Satış tutarı: <b>${esc(TL(s.amount_try))}</b> <span class="mute">· ödeme ${esc(trDate(s.paid_on))}${s.entered_by_name ? ' · ' + esc(s.entered_by_name) : ''}</span><button class="btn s" data-sale="${p.id}">Tutarı değiştir</button></div>`
+    : `<div class="row" style="gap:6px;margin:4px 0"><span class="tag w">Satış tutarı girilmedi</span><button class="btn s" data-sale="${p.id}">Tutar gir</button></div>`
+}
+function saleFields(s) {
+  return `<label class="f">Satış tutarı (TL, kapora dahil toplam)<input id="sla" type="number" min="0" step="0.01" inputmode="decimal" value="${s ? esc(Number(s.amount_try)) : ''}" placeholder="ör. 2500"></label>
+    <label class="f">Ödeme tarihi<input id="sld" type="date" value="${esc(s?.paid_on || today())}"></label>`
+}
+// Tutar alanı boş ya da 0–999.999 arası sayı olmalı; değilse uyarır (çağrı yapılmaz)
+function saleInputOk() {
+  const raw = $('sla').value.trim(), a = Number(raw)
+  if (raw === '' || (a >= 0 && a < 1000000)) return true
+  toast('Tutarı TL olarak, yalnız rakamla yazın (ör. 2500).', true); return false
+}
+// Değişiklik yoksa çağrı yapmaz; tutar boşaltılırsa (önceden vardıysa) silinir. Önce saleInputOk() çağrılmış olmalı.
+async function saveSale(pkgId, s) {
+  const raw = $('sla').value.trim(), day = $('sld').value || today()
+  if (raw === '') return s ? q(sb.rpc('rv_package_set_sale', { p_package: pkgId, p_amount: null, p_paid_on: null })) : 'degismedi'
+  const a = Number(raw)
+  if (s && Number(s.amount_try) === a && s.paid_on === day) return 'degismedi'
+  return q(sb.rpc('rv_package_set_sale', { p_package: pkgId, p_amount: a, p_paid_on: day }))
+}
+function saleDlg(c, p, s) {
+  dlg('Satış tutarı', `<p>${esc(c.full_name)} · ${esc(p.package_type)}</p><div class="grid2">${saleFields(s)}</div>
+    <p class="mute">Paketin toplam satış tutarını yazın (WhatsApp'tan alınan kapora dahil). Ödeme tarihi bugün varsayılır. Eğitmenler bu tutarı görmez; değişiklikler geçmişe kaydedilir.</p>`,
+    `<button class="btn" id="slb">Geri</button>${s ? '<button class="btn d" id="slx">Tutarı sil</button>' : ''}<button class="btn p" id="slo">Kaydet</button>`)
+  $('slb').onclick = () => clientDetail(c.id)
+  if ($('slx')) $('slx').onclick = async () => { if (!confirm('Bu paketin satış tutarı silinsin mi?')) return; await run(() => q(sb.rpc('rv_package_set_sale', { p_package: p.id, p_amount: null, p_paid_on: null })), 'Tutar silindi'); clientDetail(c.id) }
+  $('slo').onclick = async () => { if ($('sla').value.trim() === '') return toast('Tutar boş. Silmek için "Tutarı sil".', true); if (!saleInputOk()) return; await run(() => saveSale(p.id, s), 'Satış tutarı kaydedildi'); clientDetail(c.id) }
+}
+async function packageForm(c, p, sale, saleOn) {
   const sv = p?.services || []
   dlg(p ? 'Paketi düzenle' : 'Yeni paket / hizmet', `<div class="grid2">
     <label class="f">Hizmet grubu<select id="pkk">${opts(Object.entries(KIND), p?.kind || 'reformer')}</select></label>
@@ -707,7 +747,8 @@ async function packageForm(c, p) {
     <label class="f">Bitiş (boşsa başlangıçtan 30 gün)<input id="pke" type="date" value="${p?.ends_on || ''}"></label>
     <label class="f">Toplam seans<input id="pkn" type="number" min="1" value="${p?.total_sessions || 8}"></label>
     <label class="f">Sistem öncesi kullanılan seans<input id="pku" type="number" min="0" value="${p?.used_manual || 0}"></label>
-    <label class="f">Durum<select id="pka">${opts([['true', 'Aktif'], ['false', 'Pasif']], String(p ? p.active : true))}</select></label></div>
+    <label class="f">Durum<select id="pka">${opts([['true', 'Aktif'], ['false', 'Pasif']], String(p ? p.active : true))}</select></label>
+    ${saleOn ? saleFields(sale) : ''}</div>
     <p class="f mute" style="margin:10px 0 4px">Kapsadığı hizmetler (karma pakette birden fazla seçin)</p><div class="days">${S.services.filter(s => s.active).map(s => `<label><input type="checkbox" class="pksv" value="${s.code}" ${sv.includes(s.code) ? 'checked' : ''}>${esc(s.name)}</label>`).join('')}</div>
     <p class="f mute" style="margin:10px 0 4px">Haftalık ders günleri</p><div class="days">${DAYS.map((d, i) => `<label><input type="checkbox" class="pkd" value="${i + 1}" ${(p?.weekly_days || []).includes(i + 1) ? 'checked' : ''}>${d}</label>`).join('')}</div>
     <label class="f" style="margin-top:8px">Ders saatleri (virgülle, günlerle aynı sırada ya da tek saat)<input id="pkh" value="${esc((p?.weekly_times || []).map(t => t.slice(0, 5)).join(', '))}" placeholder="ör. 10:00 ya da 10:00, 18:00"></label>
@@ -720,7 +761,10 @@ async function packageForm(c, p) {
       starts_on: $('pks').value, ends_on: $('pke').value || null, total_sessions: +$('pkn').value, used_manual: +$('pku').value, active: $('pka').value === 'true',
       services: [...document.querySelectorAll('.pksv:checked')].map(x => x.value), weekly_days: [...document.querySelectorAll('.pkd:checked')].map(x => +x.value), weekly_times: times }
     if (!row.services.length) return toast('En az bir hizmet seçin.', true)
-    await run(() => p ? q(sb.from('rv_package').update(row).eq('id', p.id)) : q(sb.from('rv_package').insert(row)), 'Paket kaydedildi')
+    if (saleOn && !saleInputOk()) return
+    const saved = await run(() => p ? q(sb.from('rv_package').update(row).eq('id', p.id)) : q(sb.from('rv_package').insert(row).select('id').single()), 'Paket kaydedildi')
+    const pid = p ? p.id : saved?.id
+    if (saleOn && pid) await run(() => saveSale(pid, sale), '').catch(() => {})
     clientDetail(c.id)
   }
 }
@@ -981,7 +1025,7 @@ async function serviceForm(code) {
 }
 
 // ------------------------------------------------------------ geçmiş
-const TBL = { rv_booking: 'Randevu', rv_session: 'Seans', rv_client: 'Danışan', rv_package: 'Paket', rv_series: 'Seri', rv_leave: 'İzin', rv_holiday: 'Tatil', rv_trainer: 'Eğitmen', rv_resource: 'Oda/cihaz', rv_service: 'Hizmet', rv_staff: 'Yetki' }
+const TBL = { rv_booking: 'Randevu', rv_session: 'Seans', rv_client: 'Danışan', rv_package: 'Paket', rv_package_sale: 'Paket satış tutarı', rv_series: 'Seri', rv_leave: 'İzin', rv_holiday: 'Tatil', rv_trainer: 'Eğitmen', rv_resource: 'Oda/cihaz', rv_service: 'Hizmet', rv_staff: 'Yetki' }
 function auditText(a) {
   const n = a.new || {}, o = a.old || {}
   if (a.tbl === 'rv_booking') {

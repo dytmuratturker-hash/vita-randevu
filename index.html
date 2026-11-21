@@ -288,7 +288,7 @@ async function cancelB(id) {
   const bk = await q(sb.from('rv_booking').select('package_id,rv_session(starts_at)').eq('id', id).single())
   const late = bk.package_id && ymd(new Date(bk.rv_session.starts_at)) <= today()
   dlg('Randevuyu iptal et', `<p>Yalnız bu ders iptal edilir; seri (haftalık tekrar) devam eder, kontenjan boşalır.</p>
-    <p class="${late ? 'warn' : 'mute'}">${late ? '<b>Aynı gün iptal:</b> kurala göre paket hakkı DÜŞER.' : bk.package_id ? 'Önceden bildirilen iptal: paket hakkı geri döner. Telafi ayda 1 kez yazılabilir.' : 'Bu randevu pakete bağlı değil (hak düşmez).'}</p><label class="f">Neden (isteğe bağlı)<input id="cr" placeholder="ör. danışan gelemiyor"></label>`,
+    <p class="${late ? 'warn' : 'mute'}">${late ? '<b>Aynı gün iptal:</b> kurala göre paket hakkı DÜŞER.' : bk.package_id ? 'Önceden bildirilen iptal: paket hakkı geri döner. Telafi ayda 2 kez yazılabilir.' : 'Bu randevu pakete bağlı değil (hak düşmez).'}</p><label class="f">Neden (isteğe bağlı)<input id="cr" placeholder="ör. danışan gelemiyor"></label>`,
     `<button class="btn d" id="cok">İptal et</button>`)
   $('cok').onclick = async () => { await run(() => q(sb.rpc('rv_cancel_booking', { p_booking: id, p_reason: $('cr').value || null })), 'İptal edildi'); closeDlg(); go(S.view, true) }
 }
@@ -653,6 +653,16 @@ async function clientDetail(id) {
     const miss = p.weekly_days.filter(d => !ser.some(s => s.weekday === d && p.services.includes(s.service_code)) && !p.services.some(c => upDays.has(d + ':' + c)))
     return miss.length ? `<div class="tag w" style="display:block;margin:6px 0">Programda ${esc(p.weekly_days.map(d => DAYS[d - 1]).join(', '))} var; takvimde ${esc(miss.map(d => DAYS[d - 1]).join(', '))} randevusu yok. Doğruysa "Haftalık seri oluştur" ile ekleyin.</div>` : ''
   }
+  // 031: aynı paket + hizmetteki seriler bir grup (gün/saat değiştirme tek işlem)
+  const serGroups = []
+  ser.slice().sort((a, b) => a.weekday - b.weekday || a.start_time.localeCompare(b.start_time)).forEach(s => {
+    const key = (s.package_id || '-') + '|' + s.service_code
+    let g = serGroups.find(x => x.key === key); if (!g) serGroups.push(g = { key, list: [], pk: pk.find(p => p.id === s.package_id) })
+    g.list.push(s)
+  })
+  // Yeni paket: aynı türde başka paketin (ya da paketsiz) etkin serisi varsa "Önceki programla devam et"
+  const contOk = p => ser.some(s => s.package_id !== p.id && p.services.includes(s.service_code) && (!s.package_id || pk.find(o => o.id === s.package_id)?.kind === p.kind))
+    && !ser.some(s => s.package_id === p.id)
   dlg(c.full_name, `<p class="mute">${esc(c.phone || 'telefon yok')} ${c.source === 'clinyo' ? '· Clinyo' : ''} ${c.active ? '' : '· <span class="tag b">pasif</span>' + (c.deactivated_at ? ` <span class="mute">${esc(c.deactivated_by_name || 'bilinmiyor')} · ${new Date(c.deactivated_at).toLocaleString('tr-TR', { timeZone: TZ })}</span>` : '')} <button class="btn s" id="ced">Düzenle</button></p>
     <h4>Paketler <button class="btn s p" id="cpk">+ Paket / hizmet</button></h4>
     ${pk.map(p => { const rem = p.total_sessions - p.used - p.reserved; return `<div class="card"><div class="row"><b>${esc(p.package_type)}</b><span class="tag">${esc(KIND[p.kind])}</span>${p.active ? '' : '<span class="tag b">pasif</span>'}<span class="grow" style="flex:1"></span><button class="btn s" data-pk="${p.id}">Düzenle</button></div>
@@ -660,13 +670,16 @@ async function clientDetail(id) {
       <div class="mute">Gün/saat: ${esc((p.weekly_days || []).map(d => DAYS[d - 1]).join(', ') || '—')} ${esc((p.weekly_times || []).map(t => t.slice(0, 5)).join(', '))}</div>
       <div>Toplam <b>${p.total_sessions}</b> · Kullanılan <b>${p.used}</b> · Planlı <b>${p.reserved}</b> · Kalan <b class="${rem <= 1 ? '' : ''}">${rem}</b> ${rem <= 1 && p.active ? '<span class="tag w">bitiyor</span>' : ''}</div>
       ${saleOn ? saleLine(p, sm[p.id]) : ''}
-      ${progCheck(p)}${p.active ? `<button class="btn s" data-ser="${p.id}">Haftalık seri oluştur</button>` : ''}</div>` }).join('') || '<p class="mute">Paket yok.</p>'}
-    <h4>Haftalık seriler</h4>${ser.map(s => `<div class="part"><span class="n">${DAYS[s.weekday - 1]} ${s.start_time.slice(0, 5)} · ${esc(svc(s.service_code).name)} · ${esc(trn(s.trainer_id))}</span><button class="btn s d" data-end="${s.id}">Seriyi bitir</button></div>`).join('') || '<p class="mute">Seri yok.</p>'}
+      ${progCheck(p)}${p.active ? `<button class="btn s" data-ser="${p.id}">Haftalık seri oluştur</button>` : ''}${p.active && contOk(p) ? ` <button class="btn s p" data-cont="${p.id}">Önceki programla devam et</button>` : ''}</div>` }).join('') || '<p class="mute">Paket yok.</p>'}
+    <h4>Haftalık seriler</h4>${serGroups.map((g, gi) => `<div class="card" style="padding:6px 10px;margin:6px 0">${g.list.map(s => `<div class="part"><span class="n">${DAYS[s.weekday - 1]} ${s.start_time.slice(0, 5)} · ${esc(svc(s.service_code).name)} · ${esc(trn(s.trainer_id))}${g.pk ? ` <span class="mute">· ${esc(g.pk.package_type)}${g.pk.total_sessions - g.pk.used - g.pk.reserved <= 0 ? ' <span class="tag w">paket hakkı bitti</span>' : ''}</span>` : ' <span class="mute">· paketsiz</span>'}</span><button class="btn s d" data-end="${s.id}">Seriyi bitir</button></div>`).join('')}
+      <div class="row" style="justify-content:flex-end"><button class="btn s p" data-resch="${gi}">Gün/saat değiştir (paket korunur)</button></div></div>`).join('') || '<p class="mute">Seri yok.</p>'}
     <h4>Yaklaşan randevular</h4>${up.map(b => `<div class="part"><span class="n">${esc(dayLabel(ymd(new Date(b.rv_session.starts_at))))} ${hm(b.rv_session.starts_at)} · ${esc(svc(b.rv_session.service_code).name)} ${b.kind === 'makeup' ? '<span class="tag">telafi</span>' : ''}</span><button class="btn s" data-mv="${b.id}" data-c="${b.rv_session.service_code}">Taşı</button><button class="btn s d" data-cx="${b.id}">İptal</button></div>`).join('') || '<p class="mute">Yaklaşan randevu yok.</p>'}
     <h4>Sekreter notları</h4>${noteBlock(notes)}`, '')
   bindNotes(id, notes)
   $('ced').onclick = () => clientForm(c)
-  $('cpk').onclick = () => packageForm(c, null, null, saleOn)
+  $('cpk').onclick = () => packageForm(c, null, null, saleOn, ser)
+  $('dlgB').querySelectorAll('[data-cont]').forEach(b => b.onclick = () => continueDlg(c, pk.find(p => p.id === b.dataset.cont)))
+  $('dlgB').querySelectorAll('[data-resch]').forEach(b => b.onclick = () => rescheduleDlg(c, serGroups[+b.dataset.resch]))
   $('dlgB').querySelectorAll('[data-pk]').forEach(b => b.onclick = () => packageForm(c, pk.find(p => p.id === b.dataset.pk), sm[b.dataset.pk], saleOn))
   $('dlgB').querySelectorAll('[data-sale]').forEach(b => b.onclick = () => saleDlg(c, pk.find(p => p.id === b.dataset.sale), sm[b.dataset.sale]))
   $('dlgB').querySelectorAll('[data-ser]').forEach(b => b.onclick = () => makeSeries(c, pk.find(p => p.id === b.dataset.ser), ser))
@@ -737,8 +750,9 @@ function saleDlg(c, p, s) {
   if ($('slx')) $('slx').onclick = async () => { if (!confirm('Bu paketin satış tutarı silinsin mi?')) return; await run(() => q(sb.rpc('rv_package_set_sale', { p_package: p.id, p_amount: null, p_paid_on: null })), 'Tutar silindi'); clientDetail(c.id) }
   $('slo').onclick = async () => { if ($('sla').value.trim() === '') return toast('Tutar boş. Silmek için "Tutarı sil".', true); if (!saleInputOk()) return; await run(() => saveSale(p.id, s), 'Satış tutarı kaydedildi'); clientDetail(c.id) }
 }
-async function packageForm(c, p, sale, saleOn) {
+async function packageForm(c, p, sale, saleOn, ser = []) {
   const sv = p?.services || []
+  const hasSer = !p && ser.length > 0
   dlg(p ? 'Paketi düzenle' : 'Yeni paket / hizmet', `<div class="grid2">
     <label class="f">Hizmet grubu<select id="pkk">${opts(Object.entries(KIND), p?.kind || 'reformer')}</select></label>
     <label class="f">Paket türü<input id="pkt" value="${esc(p?.package_type || '')}" placeholder="ör. Reformer 3 kişilik 8 ders"></label>
@@ -752,7 +766,8 @@ async function packageForm(c, p, sale, saleOn) {
     <p class="f mute" style="margin:10px 0 4px">Kapsadığı hizmetler (karma pakette birden fazla seçin)</p><div class="days">${S.services.filter(s => s.active).map(s => `<label><input type="checkbox" class="pksv" value="${s.code}" ${sv.includes(s.code) ? 'checked' : ''}>${esc(s.name)}</label>`).join('')}</div>
     <p class="f mute" style="margin:10px 0 4px">Haftalık ders günleri</p><div class="days">${DAYS.map((d, i) => `<label><input type="checkbox" class="pkd" value="${i + 1}" ${(p?.weekly_days || []).includes(i + 1) ? 'checked' : ''}>${d}</label>`).join('')}</div>
     <label class="f" style="margin-top:8px">Ders saatleri (virgülle, günlerle aynı sırada ya da tek saat)<input id="pkh" value="${esc((p?.weekly_times || []).map(t => t.slice(0, 5)).join(', '))}" placeholder="ör. 10:00 ya da 10:00, 18:00"></label>
-    ${p ? `<p class="mute">Kullanılan ${p.used} · planlı ${p.reserved} · kalan ${p.total_sessions - p.used - p.reserved}</p>` : ''}`, `<button class="btn" id="pkb">Geri</button><button class="btn p" id="pko">Kaydet</button>`)
+    ${p ? `<p class="mute">Kullanılan ${p.used} · planlı ${p.reserved} · kalan ${p.total_sessions - p.used - p.reserved}</p>` : ''}
+    ${hasSer ? `<label class="row card" style="gap:8px;margin-top:10px;background:var(--chip)"><input type="checkbox" id="pkcont" checked> <span><b>Önceki haftalık programla devam et</b><br><span class="mute">Danışanın şu anki serisi (${esc(ser.map(s => DAYS[s.weekday - 1] + ' ' + s.start_time.slice(0, 5)).join(', '))}) aynı türdeki bu yeni pakete devredilir; eski seriyi iptal edip yeniden kurmanız gerekmez. Dersler eski paketin son dersinden sonra başlar.</span></span></label>` : ''}`, `<button class="btn" id="pkb">Geri</button><button class="btn p" id="pko">Kaydet</button>`)
   $('pkb').onclick = () => clientDetail(c.id)
   $('pko').onclick = async () => {
     const times = $('pkh').value.split(',').map(x => x.trim()).filter(Boolean)
@@ -765,7 +780,57 @@ async function packageForm(c, p, sale, saleOn) {
     const saved = await run(() => p ? q(sb.from('rv_package').update(row).eq('id', p.id)) : q(sb.from('rv_package').insert(row).select('id').single()), 'Paket kaydedildi')
     const pid = p ? p.id : saved?.id
     if (saleOn && pid) await run(() => saveSale(pid, sale), '').catch(() => {})
+    if (!p && pid && hasSer && $('pkcont')?.checked && row.active) {
+      const r = await run(() => q(sb.rpc('rv_package_continue', { p_package: pid, p_dry: false })), '').catch(() => null)
+      if (r) return showSeriesResult(c, 'Program devri', r)
+    }
     clientDetail(c.id)
+  }
+}
+// ------------------------------------------------------------ 031: program devri ve gün/saat değiştirme (Simay 19.11 / 20.11)
+const fmtRes = x => `${x.o_kind === 'eski' ? 'Eski' : x.o_kind === 'yeni' ? 'Yeni' : x.o_kind === 'devir' ? 'Devir' : 'Bilgi'}: ${x.o_day ? esc(dayLabel(String(x.o_day).slice(0, 10))) + ' ' : ''}${esc(x.o_time || '')} — ${esc(x.o_result === 'eklendi' ? 'yazıldı' : errText(x.o_result))}`
+function resList(r) {
+  const bad = r.filter(x => x.o_kind === 'yeni' && x.o_result !== 'eklendi' && x.o_result !== 'zaten var' && !/geçmiş saat/.test(x.o_result))
+  return `${bad.length ? `<p class="tag w" style="display:block">${bad.length} gün yazılamadı (nedeni listede). Bu günleri "Taşı" ya da hızlı randevu ile elle ayarlayın.</p>` : '<p class="tag g" style="display:block">Sorun yok.</p>'}
+    <ul style="max-height:320px;overflow:auto">${r.map(x => `<li${bad.includes(x) ? ' style="color:#b45309"' : ''}>${fmtRes(x)}</li>`).join('')}</ul>`
+}
+function showSeriesResult(c, title, r) {
+  dlg(title, `<p>${esc(c.full_name)}</p>${resList(r)}`, `<button class="btn p" onclick="clientDetail('${c.id}')">Danışana dön</button>`)
+}
+async function continueDlg(c, p) {
+  const r = await run(() => q(sb.rpc('rv_package_continue', { p_package: p.id, p_dry: true })), '').catch(() => null)
+  if (!r) return
+  dlg('Önceki programla devam', `<p>${esc(c.full_name)} · <b>${esc(p.package_type)}</b></p><p class="mute">Önizleme (henüz kaydedilmedi): eski seri kapanır, aynı gün/saat bu pakete bağlanır, dersler yazılır.</p>${resList(r)}`,
+    `<button class="btn" onclick="clientDetail('${c.id}')">Vazgeç</button><button class="btn p" id="cto">Onayla</button>`)
+  $('cto').onclick = async () => { const x = await run(() => q(sb.rpc('rv_package_continue', { p_package: p.id, p_dry: false })), 'Program devredildi').catch(() => null); if (x) showSeriesResult(c, 'Program devri', x) }
+}
+function rescheduleDlg(c, g) {
+  const cur = g.list, t0 = cur[0].start_time.slice(0, 5), code = cur[0].service_code
+  dlg('Gün/saat değiştir', `<p>${esc(c.full_name)} · ${esc(svc(code).name)}${g.pk ? ' · ' + esc(g.pk.package_type) : ''}</p>
+    <p class="mute">Şu an: ${esc(cur.map(s => DAYS[s.weekday - 1] + ' ' + s.start_time.slice(0, 5)).join(', '))}. Paket ve hakları değişmez; başlangıç tarihinden sonraki planlı dersler yeni gün/saate taşınır (kaldırılan derste hak düşmez).</p>
+    <div class="grid2"><label class="f">Başlangıç<input id="rsf" type="date" value="${today()}"></label><label class="f">Eğitmen<select id="rst">${trnOpts(cur[0].trainer_id, 'Belirtilmedi', code)}</select></label></div>
+    <p class="f mute" style="margin:10px 0 4px">Yeni günler ve saatler</p>
+    <div>${DAYS.map((d, i) => `<label class="row" style="gap:8px;margin:3px 0"><input type="checkbox" class="rsd" value="${i + 1}"> <span style="width:34px">${d}</span><input class="rsh" data-d="${i + 1}" value="${esc(t0)}" style="width:80px"></label>`).join('')}</div>
+    <div id="rsr"></div>`,
+    `<button class="btn" onclick="clientDetail('${c.id}')">Geri</button><button class="btn" id="rsp">Önizle</button><button class="btn p" id="rso" disabled>Uygula</button>`)
+  const args = dry => {
+    const pairs = [...document.querySelectorAll('.rsd:checked')].map(x => ({ d: +x.value, t: document.querySelector(`.rsh[data-d="${x.value}"]`).value.trim() }))
+    if (!pairs.length) { toast('En az bir gün seçin.', true); return null }
+    if (pairs.some(x => !/^\d{1,2}:\d\d$/.test(x.t))) { toast('Saati 09:00 biçiminde yazın.', true); return null }
+    return { p_series: cur.map(s => s.id), p_new: pairs, p_from: $('rsf').value || today(), p_trainer: $('rst').value || null, p_dry: dry }
+  }
+  document.querySelectorAll('.rsd,.rsh,#rsf,#rst').forEach(el => el.addEventListener('change', () => { $('rso').disabled = true }))
+  $('rsp').onclick = async () => {
+    const a = args(true); if (!a) return
+    const r = await run(() => q(sb.rpc('rv_series_reschedule', a)), '').catch(() => null)
+    if (!r) return
+    $('rsr').innerHTML = `<h4>Önizleme (henüz kaydedilmedi)</h4>${resList(r)}`; $('rso').disabled = false
+  }
+  $('rso').onclick = async () => {
+    const a = args(false); if (!a) return
+    if (!confirm('Yeni gün/saat uygulansın mı? Eski planlı dersler kaldırılıp yeni günlere yazılacak (hak düşmez).')) return
+    const r = await run(() => q(sb.rpc('rv_series_reschedule', a)), 'Gün/saat değiştirildi').catch(() => null)
+    if (r) showSeriesResult(c, 'Gün/saat değişikliği', r)
   }
 }
 async function makeSeries(c, p, ser = []) {
@@ -912,7 +977,7 @@ async function packageAlertsView() {
   const g = [['Süresi dolan (yeni randevu kapalı, uzatma yönetici)', al.filter(p => p.expired), p => `<span class="tag b">${-p.days_left} gün geçti</span>`],
              ['3 gün içinde bitecek', al.filter(p => !p.expired && p.days_left !== null && p.days_left <= 3), p => `${p.days_left} gün kaldı`],
              ['Hakkı bitti ya da 1 kaldı (yeni paket gerekir)', al.filter(p => !p.expired && !(p.days_left !== null && p.days_left <= 3) && p.left <= 1), p => `kalan ${p.left}`]]
-  $('m').innerHTML = `<div class="card"><h3 style="margin-top:0">Paket uyarıları</h3><p class="mute">Kalan haklar silinmez. Süre uzatma ve hak ekleme yalnız yöneticide. Telafi ayda 1. Aynı gün iptalde hak düşer.</p>
+  $('m').innerHTML = `<div class="card"><h3 style="margin-top:0">Paket uyarıları</h3><p class="mute">Kalan haklar silinmez. Süre uzatma ve hak ekleme yalnız yöneticide. Telafi ayda 2. Aynı gün iptalde hak düşer.</p>
     ${g.map(([h, list, why]) => `<h4>${h} (${list.length})</h4>${list.length ? `<table class="list-click"><tr><th>Danışan</th><th>Paket</th><th>Tarih</th><th>Kullanım</th><th></th></tr>${list.map(p => row(p, why(p))).join('')}</table>` : '<p class="mute">Yok.</p>'}`).join('')}</div>`
 }
 // 021: Personel hesapları — liste (ad, giriş kimliği, yetki, bağlı eğitmen, durum, son giriş, son yoklama işareti) + Aktif/Pasif.
